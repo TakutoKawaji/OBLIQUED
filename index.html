@@ -17,19 +17,34 @@ const view=document.querySelector('#view'), ui=document.querySelector('#ui'), v=
 const source=document.createElement('canvas'), s=source.getContext('2d',{willReadFrequently:true});
 const ZOOMS=[1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
 let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
+let jx=0, jy=0;
 const PUZZLE_MAP=
-`____, ____ _ F__Z_ W__K___
-S___Y _ _______ R____N_
-___ A______G_
-T_X_ C__V___ J_M_____
-__ P__H___ ______ OBLIQUED_`;
+`____,________F__Z__W__K____
+S___Y___________R____N_
+____A______G_
+T_X__C__V____J_M_____
+___P__H___________OBLIQUED_`;
 const WORLD_MAP=
-`WELL_ IT'S A _UZ_Y _AL_.__
+`WELL_ IT'S A _UZ_Y _AL_.___
 _TRA_ A LITTLE, _ETUR_,
 YET _RRIVIN_.
 _E_T _UR_ES, _U_BLES,
-SO _ER_APS THAT'S _______.`;
-function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:c*GRID,y:r*GRID})}});return out}
+SO _ER_APS THAT'S ________.`;
+// TEXT_STEP is the horizontal advance for plain-text columns (tighter than GRID).
+// Measured against the widest glyph ink actually used in WORLD_MAP ('W' ~= 103 world units
+// at GRID=128), with a safety margin, so no two adjacent text glyphs can touch. Puzzle
+// columns always keep the full GRID width since a puzzle's own 16x16 grid can't shrink
+// without distorting its diagonal tile art, so this also guarantees puzzles never overlap.
+const TEXT_STEP=112;
+const PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n');
+const ROW_WIDTH=[];
+const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
+  const wline=WORLD_LINES[r]||'', len=Math.max(pline.length,wline.length),centers=[];let x=0;
+  for(let c=0;c<len;c++){const isPuzzle=pline[c]&&pline[c]!=='_';const w=isPuzzle?GRID:TEXT_STEP;centers[c]=x+w/2;x+=w}
+  ROW_WIDTH[r]=x;
+  return centers;
+});
+function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:ROW_CENTER_X[r][c],y:r*GRID})}});return out}
 
 class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){while(this.p[x]!==x){this.p[x]=this.p[this.p[x]];x=this.p[x]}return x}union(a,b){a=this.find(a);b=this.find(b);if(a!==b)this.p[a]=b}}
 function vertexClues(active,diag,rows,cols){const out={};for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const d=diag[r+','+c],v=d==='black'?[[r,c],[r+1,c+1]]:[[r,c+1],[r+1,c]];v.forEach(([y,x])=>out[y+','+x]=(out[y+','+x]||0)+1)}return out}
@@ -82,48 +97,32 @@ function makePuzzle(ch,index,x,y){
 }
 
 const MAP_LINES=PUZZLE_MAP.split('\n');
-const MAP_ROWS=MAP_LINES.length, MAP_COLS=Math.max(...MAP_LINES.map(l=>l.length));
-const WORLD_MIN_X=-GRID/2, WORLD_MAX_X=(MAP_COLS-1)*GRID+GRID/2;
-const WORLD_MIN_Y=-GRID/2, WORLD_MAX_Y=(MAP_ROWS-1)*GRID+GRID/2;
+const MAP_ROWS=MAP_LINES.length;
+const FRAME_MARGIN=GRID;
+const WORLD_MIN_X=-FRAME_MARGIN, WORLD_MAX_X=Math.max(...ROW_WIDTH)+FRAME_MARGIN;
+const WORLD_MIN_Y=-FRAME_MARGIN, WORLD_MAX_Y=(MAP_ROWS-1)*GRID+FRAME_MARGIN;
 function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
 
 const puzzleEntries=parseGrid(PUZZLE_MAP), worldLetters=parseGrid(WORLD_MAP);
 puzzleEntries.forEach((e, i) => e.globalIndex = i);
 
-const puzzleGroups = [];
-let cur = [], prev = null;
-puzzleEntries.forEach(p => {
-  if (!prev || p.r !== prev.r || (p.c - prev.c) > 8) {
-    if (cur.length) puzzleGroups.push(cur);
-    cur = [];
-  }
-  cur.push(p);
-  prev = p;
-});
-if (cur.length) puzzleGroups.push(cur);
+// Stages are chunked by punctuation in reading order (row, then column), not by column gaps.
+// Each stage covers everything since the previous ',' or '.' up to and including the next one —
+// whether that punctuation mark itself is a plain-text glyph or a puzzle to solve.
+const allEntries=[...puzzleEntries.map(e=>({e,kind:'puzzle'})), ...worldLetters.map(e=>({e,kind:'letter'}))]
+  .sort((a,b)=>a.e.r-b.e.r||a.e.c-b.e.c);
 
-const stages = Array.from({length: puzzleGroups.length}, () => ({ letters: [], puzzles: [] }));
-puzzleGroups.forEach((group, i) => {
-  group.forEach(p => { p.stageIndex = i; stages[i].puzzles.push(p); });
-});
-
-worldLetters.forEach(wl => {
-  const groupsOnLine = puzzleGroups.map((g, i) => ({g, i})).filter(x => x.g[0].r === wl.r);
-  if (groupsOnLine.length === 0) {
-    stages[stages.length - 1].letters.push(wl);
-  } else if (groupsOnLine.length === 1) {
-    stages[groupsOnLine[0].i].letters.push(wl);
-  } else {
-    let assigned = groupsOnLine[groupsOnLine.length - 1].i;
-    for (let k = 0; k < groupsOnLine.length; k++) {
-      if (groupsOnLine[k].g[0].c > wl.c) {
-        assigned = groupsOnLine[k].i;
-        break;
-      }
-    }
-    stages[assigned].letters.push(wl);
+const stages=[];
+let curPuzzles=[], curLetters=[];
+allEntries.forEach(({e,kind})=>{
+  if(kind==='puzzle')curPuzzles.push(e);else curLetters.push(e);
+  if(e.ch===','||e.ch==='.'){
+    stages.push({puzzles:curPuzzles,letters:curLetters});
+    curPuzzles=[];curLetters=[];
   }
 });
+if(curPuzzles.length||curLetters.length)stages.push({puzzles:curPuzzles,letters:curLetters});
+stages.forEach((stage,i)=>stage.puzzles.forEach(p=>p.stageIndex=i));
 
 const puzzles = [];
 const activeWorldLetters = [];
@@ -233,10 +232,9 @@ function drawBoundaryFrame(){
 function prepareSource(){
   if(innerWidth<=0||innerHeight<=0)return;
   s.setTransform(fxDpr,0,0,fxDpr,0,0);s.fillStyle='#000';s.fillRect(0,0,innerWidth,innerHeight);
-  const squares=new Path2D(), dots=new Path2D();
-  puzzles.forEach(p=>{if(inViewport(p.x,p.y))drawPuzzleSource(p,squares,dots)});
-  s.fillStyle='#fff';s.fill(squares);
-  s.fillStyle='#000';s.fill(dots);
+  const cells=new Path2D();
+  puzzles.forEach(p=>{if(inViewport(p.x,p.y))drawPuzzleSource(p,cells)});
+  s.fillStyle='#fff';s.fill(cells,'evenodd');
   activeWorldLetters.forEach(e=>{if(inViewport(e.x,e.y))drawWorldLetterSource(e)});
   drawBoundaryFrame();
 }
@@ -250,15 +248,19 @@ function drawWorldLetterSource(e){
     s.drawImage(glyph,c*cellPx,r*cellPx,cellPx,cellPx,ox+c*cellSize,oy+r*cellSize,cellSize,cellSize);
   });
 }
-function drawPuzzleSource(p,squares,dots){
+// 'dot' cells are drawn as a smaller rect nested inside the outer square, in the SAME path as
+// the outer square. With fillRule='evenodd' the nested rect becomes an unfilled hole rather than
+// needing its own black fill pass — the cleared black background already shows through it. Same
+// visual role as the old white-square-plus-black-circle, one rect shape instead of a circle.
+function drawPuzzleSource(p,cells){
   const g=worldToScreen(p.x,p.y), size=CELL*zoom;
   const ox=g.x-p.cols*size/2, oy=g.y-p.rows*size/2;
   for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c]){
     const state=p.player[r+','+c];
     if(state==='white'||state==='dot'){
       const x=ox+c*size,y=oy+r*size;
-      squares.rect(x,y,size,size);
-      if(state==='dot'){dots.moveTo(x+size/2+size*.2,y+size/2);dots.arc(x+size/2,y+size/2,size*.2,0,Math.PI*2)}
+      cells.rect(x,y,size,size);
+      if(state==='dot'){const inset=size*.3;cells.rect(x+inset,y+inset,size-2*inset,size-2*inset)}
     }
   }
 }
@@ -289,7 +291,7 @@ function postEffect(){
   v.save();v.translate(phaseX-t,phaseY-t);v.fillStyle=v.createPattern(tiles.white,'repeat');v.fillRect(-(phaseX-t),-(phaseY-t),innerWidth,innerHeight);v.restore();
   const data=s.getImageData(0,0,source.width,source.height).data;
   for(let y=phaseY-t;y<innerHeight;y+=t)for(let x=phaseX-t;x<innerWidth;x+=t){
-    let min=255,max=0;for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){let px=Math.max(0,Math.min(source.width-1,Math.floor((x+t*xx)*fxDpr))),py=Math.max(0,Math.min(source.height-1,Math.floor((y+t*yy)*fxDpr))),bright=data[(py*source.width+px)*4];min=Math.min(min,bright);max=Math.max(max,bright)}
+    let min=255,max=0;for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){let px=Math.max(0,Math.min(source.width-1,Math.floor((x+t*xx+jx)*fxDpr))),py=Math.max(0,Math.min(source.height-1,Math.floor((y+t*yy+jy)*fxDpr))),bright=data[(py*source.width+px)*4];min=Math.min(min,bright);max=Math.max(max,bright)}
     const kind=min===255?'white':max===0?'black':'mixed';
     if(kind!=='white')v.drawImage(tiles[kind],x,y);
   }
@@ -357,6 +359,17 @@ function scheduleRender(){
   if(renderScheduled)return;renderScheduled=true;
   requestAnimationFrame(()=>{renderScheduled=false;render()});
 }
+let shimmerFrame=0;
+function shimmerLoop(){
+  shimmerFrame++;
+  if(fxEnabled){
+    jx=(Math.random()-.5)*1.2;
+    jy=(Math.random()-.5)*1.2;
+    scheduleRender();
+  }
+  requestAnimationFrame(shimmerLoop);
+}
+requestAnimationFrame(shimmerLoop);
 function clickPuzzle(e){if(zoom<8||allClear)return;let q=screenToWorld(e.clientX,e.clientY);
   for(const p of puzzles){if(p.cleared||!p.revealed)continue;let left=p.x-p.cols*CELL/2,top=p.y-p.rows*CELL/2,c=Math.floor((q.x-left)/CELL),r=Math.floor((q.y-top)/CELL);if(r<0||c<0||r>=p.rows||c>=p.cols||!p.active[r]?.[c])continue;
     const k=r+','+c;
