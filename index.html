@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OBLIQUE,</title>
+<style>
+  html,body{margin:0;overflow:hidden;background:#000;height:100%;font-family:Arial,sans-serif}
+  canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
+  #view{z-index:1}#ui{z-index:2}
+  #fx-toggle{position:fixed;z-index:4;right:14px;bottom:14px;padding:7px 10px;background:#000;color:#fff;border:1px solid #fff;font:12px Arial;letter-spacing:.08em;cursor:pointer}
+</style>
+<canvas id="view"></canvas><canvas id="ui"></canvas><button id="fx-toggle">FX: ON</button>
+<script src="puzzle-data.js" onerror="console.log('[OBLIQUE] puzzle-data.js not found. Open generator.html to create it.')"></script>
+<script>
+(()=>{'use strict';
+const view=document.querySelector('#view'), ui=document.querySelector('#ui'), v=view.getContext('2d'), u=ui.getContext('2d');
+const source=document.createElement('canvas'), s=source.getContext('2d',{willReadFrequently:true});
+const ZOOMS=[1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
+let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
+const PUZZLE_MAP=
+`____,_________W__K
+______________S__Y
+______________C__V
+______R____N
+____________A______G
+______F_D
+______J_M
+______P_Z
+______________________OBLIQUE`;
+const WORLD_MAP=
+`WELL_ IMAGINE _AL_ING.
+IT'S A LITTLE _WA_ING,
+     A LITTLE _UR_ED,
+MAYBE _ETUR_ING,
+YET SOMEHOW _RRIVIN_.
+WORDS _A_E.
+      _U_BLE.
+      _U_ZLE ME.
+SO PERHAPS, I CALL IT _______.`;
+function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:c*GRID,y:r*GRID})}});return out}
+
+class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){while(this.p[x]!==x){this.p[x]=this.p[this.p[x]];x=this.p[x]}return x}union(a,b){a=this.find(a);b=this.find(b);if(a!==b)this.p[a]=b}}
+function vertexClues(active,diag,rows,cols){const out={};for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const d=diag[r+','+c],v=d==='black'?[[r,c],[r+1,c+1]]:[[r,c+1],[r+1,c]];v.forEach(([y,x])=>out[y+','+x]=(out[y+','+x]||0)+1)}return out}
+function letterName(i){return String.fromCharCode(65+i)}
+function alphabetHints(active,diag,rows,cols){const dsu=new DSU((rows+1)*(cols+1)),edges=[];const id=(r,c)=>r*(cols+1)+c;for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const slash=diag[r+','+c]==='dot';dsu.union(slash?id(r,c+1):id(r,c),slash?id(r+1,c):id(r+1,c+1));if(r===0||!active[r-1][c])edges.push({r,c,side:'top',v:slash?id(r,c+1):id(r,c)});if(r===rows-1||!active[r+1][c])edges.push({r,c,side:'bottom',v:slash?id(r+1,c):id(r+1,c+1)});if(c===0||!active[r][c-1])edges.push({r,c,side:'left',v:slash?id(r+1,c):id(r,c)});if(c===cols-1||!active[r][c+1])edges.push({r,c,side:'right',v:slash?id(r+1,c+1):id(r,c+1)})}
+  const groups={};edges.forEach(e=>(groups[dsu.find(e.v)]??=[]).push(e));let n=0,out=[];Object.values(groups).forEach(g=>{if(g.length>1){const label=letterName(n++);g.forEach(e=>out.push({...e,label}))}});return out}
+function vidToKey(v,cols){const r=Math.floor(v/(cols+1)),c=v%(cols+1);return r+','+c}
+function computeCluesExcludingLetters(active,answer,rows,cols){
+  const letters=alphabetHints(active,answer,rows,cols);
+  const letterKeys=new Set(letters.map(h=>vidToKey(h.v,cols)));
+  const fullAll=vertexClues(active,answer,rows,cols),full={};
+  Object.entries(fullAll).forEach(([k,val])=>{if(!letterKeys.has(k))full[k]=val});
+  return {full,letters};
+}
+function playerMatchesClues(p){const c=vertexClues(p.active,p.player,p.rows,p.cols);return Object.entries(p.clues).every(([k,n])=>(c[k]||0)===n)}
+function playerMatchesAlphabet(p){const got=alphabetHints(p.active,p.player,p.rows,p.cols),a={};got.forEach(e=>(a[e.label]??=[]).push(e.v));const want={};p.letterHints.forEach(e=>(want[e.label]??=[]).push(e.v));return Object.keys(want).every(k=>a[k]&&a[k].length===want[k].length&&a[k].every(v=>want[k].includes(v)))}
+function vertexOptions(active,rows,cols,vr,vc){const q=[];[[vr-1,vc-1,'black'],[vr-1,vc,'dot'],[vr,vc-1,'dot'],[vr,vc,'black']].forEach(([r,c,state])=>{if(r>=0&&c>=0&&r<rows&&c<cols&&active[r][c])q.push({key:r+','+c,state})});return q}
+// NOTE: puzzle generation (solveUnique / edgeOK / generatePuzzleLoops) lives in generator.html now.
+// The game only ever reads pre-solved puzzles from PUZZLE_CACHE (puzzle-data.js); it never solves anything at runtime.
+
+function computeActiveGrid(ch){
+  const rows=16,cols=16,scale=40,mask=document.createElement('canvas'),m=mask.getContext('2d');
+  mask.width=cols*scale;mask.height=rows*scale;m.fillStyle='#000';m.fillRect(0,0,mask.width,mask.height);m.fillStyle='#fff';m.textAlign='center';m.textBaseline='middle';let fontSize=mask.height*.99;m.font=`bold ${fontSize}px Arial`;while(m.measureText(ch).width>mask.width*.97){fontSize-=1;m.font=`bold ${fontSize}px Arial`};m.fillText(ch,mask.width/2,mask.height/2+fontSize*.02);
+  const pixels=m.getImageData(0,0,mask.width,mask.height).data,active=[],isBorder=[];
+  for(let r=0;r<rows;r++){active[r]=[];isBorder[r]=[];for(let c=0;c<cols;c++){
+    let white=0;for(let yy=0;yy<scale;yy++)for(let xx=0;xx<scale;xx++)white+=pixels[((r*scale+yy)*mask.width+c*scale+xx)*4];
+    active[r][c]=white/(scale*scale)>96;
+    let min=255;
+    for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){
+      let px=Math.floor(c*scale + scale*xx), py=Math.floor(r*scale + scale*yy);
+      min=Math.min(min, pixels[(py*mask.width+px)*4]);
+    }
+    isBorder[r][c] = min <= 210;
+  }}
+  return {rows,cols,scale,mask,active,isBorder};
+}
+function makePuzzle(ch,index,x,y){
+  const {rows,cols,scale,mask,active,isBorder}=computeActiveGrid(ch);
+  const answer={},initialPlayer={};
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){
+    const key=r+','+c;
+    answer[key]=((r*7+c*3+index)%2?'black':'dot');
+    initialPlayer[key]=isBorder[r][c]?'dot':'white';
+  }
+  const cached=window.PUZZLE_CACHE&&window.PUZZLE_CACHE[index];
+  if(cached)Object.assign(answer,cached.answer);
+  const fallback=computeCluesExcludingLetters(active,answer,rows,cols);
+  const clues=cached?cached.clues:fallback.full,letterHints=cached?cached.letterHints:fallback.letters;
+  return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false,mask,scale};
+}
+
+const MAP_LINES=PUZZLE_MAP.split('\n');
+const MAP_ROWS=MAP_LINES.length, MAP_COLS=Math.max(...MAP_LINES.map(l=>l.length));
+const WORLD_MIN_X=-GRID/2, WORLD_MAX_X=(MAP_COLS-1)*GRID+GRID/2;
+const WORLD_MIN_Y=-GRID/2, WORLD_MAX_Y=(MAP_ROWS-1)*GRID+GRID/2;
+function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
+
+const puzzleEntries=parseGrid(PUZZLE_MAP), worldLetters=parseGrid(WORLD_MAP);
+puzzleEntries.forEach((e, i) => e.globalIndex = i);
+
+const puzzleGroups = [];
+let cur = [], prev = null;
+puzzleEntries.forEach(p => {
+  if (!prev || p.r !== prev.r || (p.c - prev.c) > 8) {
+    if (cur.length) puzzleGroups.push(cur);
+    cur = [];
+  }
+  cur.push(p);
+  prev = p;
+});
+if (cur.length) puzzleGroups.push(cur);
+
+const stages = Array.from({length: puzzleGroups.length}, () => ({ letters: [], puzzles: [] }));
+puzzleGroups.forEach((group, i) => {
+  group.forEach(p => { p.stageIndex = i; stages[i].puzzles.push(p); });
+});
+
+worldLetters.forEach(wl => {
+  const groupsOnLine = puzzleGroups.map((g, i) => ({g, i})).filter(x => x.g[0].r === wl.r);
+  if (groupsOnLine.length === 0) {
+    stages[stages.length - 1].letters.push(wl);
+  } else if (groupsOnLine.length === 1) {
+    stages[groupsOnLine[0].i].letters.push(wl);
+  } else {
+    let assigned = groupsOnLine[groupsOnLine.length - 1].i;
+    for (let k = 0; k < groupsOnLine.length; k++) {
+      if (groupsOnLine[k].g[0].c > wl.c) {
+        assigned = groupsOnLine[k].i;
+        break;
+      }
+    }
+    stages[assigned].letters.push(wl);
+  }
+});
+
+const puzzles = [];
+const activeWorldLetters = [];
+let currentStageIndex = 0;
+
+function revealTiles(newPuzzles, newLetters, onDone) {
+  const queue = [];
+  newPuzzles.forEach(p => {
+    Object.keys(p.initialPlayer).forEach(key => queue.push({ type: 'cell', p, key }));
+  });
+  newLetters.forEach(e => {
+    e.cells.forEach(key => queue.push({ type: 'worldcell', e, key }));
+  });
+  for (let i = queue.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [queue[i], queue[j]] = [queue[j], queue[i]];
+  }
+  if (queue.length === 0) {
+    newPuzzles.forEach(p => p.revealed = true);
+    onDone && onDone();
+    return;
+  }
+  const perFrame = Math.max(1, Math.ceil(queue.length / 72));
+  let idx = 0;
+  function step() {
+    const end = Math.min(queue.length, idx + perFrame);
+    for (; idx < end; idx++) {
+      const item = queue[idx];
+      if (item.type === 'cell') {
+        item.p.player[item.key] = item.p.initialPlayer[item.key];
+        item.p.dirty = true;
+      } else {
+        item.e.revealedCells.add(item.key);
+      }
+    }
+    render();
+    if (idx < queue.length) {
+      requestAnimationFrame(step);
+    } else {
+      newPuzzles.forEach(p => p.revealed = true);
+      onDone && onDone();
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+function spawnStage(index) {
+  if (index >= stages.length) return;
+  const stage = stages[index];
+  stage.letters.forEach(e => { e.cells = getGlyphCells(e.ch); e.revealedCells = new Set(); });
+  activeWorldLetters.push(...stage.letters);
+  const newPuzzles = stage.puzzles.map(p => makePuzzle(p.ch, p.globalIndex, p.x, p.y));
+  puzzles.push(...newPuzzles);
+  render();
+  revealTiles(newPuzzles, stage.letters, () => {
+    allClear = (index === stages.length - 1) && puzzles.every(x => x.cleared);
+    render();
+  });
+}
+
+const WORLD_TILES=GRID/CELL;
+const glyphCache=new Map();
+function getGlyph(ch){
+  if(glyphCache.has(ch))return glyphCache.get(ch);
+  const gscale=32,size=WORLD_TILES*gscale,cv=document.createElement('canvas'),g=cv.getContext('2d');
+  cv.width=cv.height=size;
+  g.fillStyle='#000';g.fillRect(0,0,size,size);
+  g.textAlign='center';g.textBaseline='middle';
+  let fontSize=size*.95;g.font=`${fontSize}px Arial`;
+  while(g.measureText(ch).width>size*.85){fontSize-=1;g.font=`${fontSize}px Arial`}
+  g.strokeStyle='#fff';g.lineWidth=size*.01;g.lineJoin='round';g.strokeText(ch,size/2,size/2+fontSize*.02);
+  glyphCache.set(ch,cv);return cv;
+}
+const glyphCellsCache=new Map();
+function getGlyphCells(ch){
+  if(glyphCellsCache.has(ch))return glyphCellsCache.get(ch);
+  const glyph=getGlyph(ch),gctx=glyph.getContext('2d');
+  const cellPx=glyph.width/WORLD_TILES;
+  const data=gctx.getImageData(0,0,glyph.width,glyph.height).data;
+  const cells=[];
+  for(let r=0;r<WORLD_TILES;r++)for(let c=0;c<WORLD_TILES;c++){
+    let hasInk=false;
+    for(let yy=0;yy<cellPx&&!hasInk;yy+=2)for(let xx=0;xx<cellPx&&!hasInk;xx+=2){
+      const px=Math.floor(c*cellPx+xx),py=Math.floor(r*cellPx+yy);
+      if(data[(py*glyph.width+px)*4]>40)hasInk=true;
+    }
+    if(hasInk)cells.push(r+','+c);
+  }
+  glyphCellsCache.set(ch,cells);return cells;
+}
+function worldToScreen(x,y){return {x:(x-cam.x)*zoom+innerWidth/2,y:(y-cam.y)*zoom+innerHeight/2}}
+function screenToWorld(x,y){return {x:(x-innerWidth/2)/zoom+cam.x,y:(y-innerHeight/2)/zoom+cam.y}}
+function inViewport(x,y){const g=worldToScreen(x,y),half=GRID*zoom/2;return g.x+half>=0&&g.x-half<=innerWidth&&g.y+half>=0&&g.y-half<=innerHeight}
+function resize(){
+  dpr=Math.min(devicePixelRatio||1,2);fxDpr=1;
+  ui.width=Math.max(1,Math.round(innerWidth*dpr));ui.height=Math.max(1,Math.round(innerHeight*dpr));
+  [view,source].forEach(c=>{c.width=Math.max(1,Math.round(innerWidth*fxDpr));c.height=Math.max(1,Math.round(innerHeight*fxDpr))});
+  if(!cameraInitialized&&innerWidth>0&&innerHeight>0){cam.x=WORLD_MIN_X;cam.y=WORLD_MIN_Y;cameraInitialized=true}
+  clampCamera();
+  render();
+}
+function drawBoundaryFrame(){
+  const p1=worldToScreen(WORLD_MIN_X,WORLD_MIN_Y), p2=worldToScreen(WORLD_MAX_X,WORLD_MAX_Y);
+  s.strokeStyle='#fff';s.lineWidth=BASE_TILE*zoom;
+  s.strokeRect(p1.x,p1.y,p2.x-p1.x,p2.y-p1.y);
+}
+function prepareSource(){
+  if(innerWidth<=0||innerHeight<=0)return;
+  s.setTransform(fxDpr,0,0,fxDpr,0,0);s.fillStyle='#000';s.fillRect(0,0,innerWidth,innerHeight);
+  puzzles.forEach(p=>{if(inViewport(p.x,p.y))drawPuzzleSource(p)});
+  activeWorldLetters.forEach(e=>{if(inViewport(e.x,e.y))drawWorldLetterSource(e)});
+  drawBoundaryFrame();
+}
+function drawWorldLetterSource(e){
+  if(!e.cells)return;
+  const glyph=getGlyph(e.ch),g=worldToScreen(e.x,e.y),size=WORLD_TILES*CELL*zoom;
+  const cellPx=glyph.width/WORLD_TILES,cellSize=size/WORLD_TILES,ox=g.x-size/2,oy=g.y-size/2;
+  e.cells.forEach(key=>{
+    if(!e.revealedCells.has(key))return;
+    const [r,c]=key.split(',').map(Number);
+    s.drawImage(glyph,c*cellPx,r*cellPx,cellPx,cellPx,ox+c*cellSize,oy+r*cellSize,cellSize,cellSize);
+  });
+}
+function drawPuzzleSource(p){
+  const g=worldToScreen(p.x,p.y), size=CELL*zoom;
+  const ox=g.x-p.cols*size/2, oy=g.y-p.rows*size/2;
+  for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c]){
+    const state=p.player[r+','+c],x=ox+c*size,y=oy+r*size;
+    if(state==='white'){
+      s.fillStyle='#fff';s.fillRect(x,y,size,size);
+    }
+    else if(state==='dot'){s.fillStyle='#fff';s.fillRect(x,y,size,size);s.fillStyle='#000';s.beginPath();s.arc(x+size/2,y+size/2,size*.2,0,Math.PI*2);s.fill()}
+  }
+}
+function addTileShape(path,x,y,size,kind){
+  const q=size/4;
+  const bands=kind==='black'
+    ? [[[0,q],[3*q,size],[q,size],[0,3*q]],[[q,0],[size,3*q],[size,q],[3*q,0]]]
+    : kind==='mixed' ? [[[size,q],[q,size],[3*q,size],[size,3*q]],[[3*q,0],[0,3*q],[0,q],[q,0]]]
+    : [[[q,0],[3*q,0],[size,q],[size,3*q],[3*q,size],[q,size],[0,3*q],[0,q]]]
+  bands.forEach(points=>{points.forEach(([px,py],i)=>i?path.lineTo(x+px,y+py):path.moveTo(x+px,y+py));path.closePath()});
+}
+const tileBitmapCache={};
+function getTileBitmaps(z){
+  let e=tileBitmapCache[z];if(e)return e;
+  const t=BASE_TILE*z;
+  const mk=kind=>{const c=document.createElement('canvas');c.width=t;c.height=t;const g=c.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,t,t);const path=new Path2D();addTileShape(path,0,0,t,kind);g.fillStyle='#fff';g.fill(path);return c};
+  e={white:mk('white'),black:mk('black'),mixed:mk('mixed')};tileBitmapCache[z]=e;return e;
+}
+function postEffect(){
+  if(source.width<=0||source.height<=0||innerWidth<=0||innerHeight<=0)return;
+  v.setTransform(fxDpr,0,0,fxDpr,0,0);
+  const t=BASE_TILE*zoom;
+  const phaseX=(((innerWidth/2-cam.x*zoom)%t)+t)%t, phaseY=(((innerHeight/2-cam.y*zoom)%t)+t)%t;
+  const tiles=getTileBitmaps(zoom);
+  v.save();v.translate(phaseX-t,phaseY-t);v.fillStyle=v.createPattern(tiles.white,'repeat');v.fillRect(-(phaseX-t),-(phaseY-t),innerWidth,innerHeight);v.restore();
+  const data=s.getImageData(0,0,source.width,source.height).data;
+  for(let y=phaseY-t;y<innerHeight;y+=t)for(let x=phaseX-t;x<innerWidth;x+=t){
+    let min=255,max=0;for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){let px=Math.max(0,Math.min(source.width-1,Math.floor((x+t*xx)*fxDpr))),py=Math.max(0,Math.min(source.height-1,Math.floor((y+t*yy)*fxDpr))),bright=data[(py*source.width+px)*4];min=Math.min(min,bright);max=Math.max(max,bright)}
+    const kind=min===255?'white':max===0?'black':'mixed';
+    if(kind!=='white')v.drawImage(tiles[kind],x,y);
+  }
+}
+function clueMismatch(p,vk,target){
+  const [vr,vc]=vk.split(',').map(Number),opts=vertexOptions(p.active,p.rows,p.cols,vr,vc);
+  const touch=opts.filter(o=>p.player[o.key]===o.state).length;
+  return touch !== target;
+}
+function letterMismatchSet(p){
+  const d=new DSU((p.rows+1)*(p.cols+1)),id=(r,c)=>r*(p.cols+1)+c;
+  Object.entries(p.player).forEach(([k,state])=>{
+    if(state==='white')return;
+    const [r,c]=k.split(',').map(Number);
+    d.union(state==='black'?id(r,c):id(r,c+1),state==='black'?id(r+1,c+1):id(r+1,c));
+  });
+  const bad=new Set();
+  const labelNodes={};
+  p.letterHints.forEach(h => {
+    (labelNodes[h.label] ??= []).push(h.v);
+  });
+  for(const [label, nodes] of Object.entries(labelNodes)){
+    let isCorrect = true;
+    const root = d.find(nodes[0]);
+    if(nodes.some(v => d.find(v) !== root)){
+      isCorrect = false;
+    }
+    if(isCorrect) {
+      for(const otherLabel of Object.keys(labelNodes)){
+        if(label === otherLabel) continue;
+        if(labelNodes[otherLabel].some(v => d.find(v) === root)){
+          isCorrect = false;
+          break;
+        }
+      }
+    }
+    if(!isCorrect){
+      nodes.forEach(v => bad.add(v));
+    }
+  }
+  return bad;
+}function refreshMismatchCache(p){
+  if(!p.dirty)return;
+  const bad={};Object.entries(p.clues).forEach(([key,n])=>bad[key]=clueMismatch(p,key,n));
+  p._clueBad=bad;p._letterBad=letterMismatchSet(p);p.dirty=false;
+}
+function drawUI(){
+  u.setTransform(dpr,0,0,dpr,0,0);u.clearRect(0,0,innerWidth,innerHeight);if(zoom<8)return;
+  u.strokeStyle='#fff';u.fillStyle='#fff';u.lineWidth=1;u.font='44px Arial';u.textAlign='center';u.textBaseline='middle';
+  puzzles.forEach(p=>{
+    if(!inViewport(p.x,p.y))return;
+    refreshMismatchCache(p);
+    const g=worldToScreen(p.x,p.y),z=CELL*zoom,ox=g.x-p.cols*z/2,oy=g.y-p.rows*z/2;
+    for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c])u.strokeRect(ox+c*z+.5,oy+r*z+.5,z-1,z-1);
+    Object.entries(p.clues).forEach(([key,n])=>{let [r,c]=key.split(',').map(Number);u.fillStyle=p._clueBad[key]?'#f33':'#fff';u.fillText(n,ox+c*z,oy+r*z)});
+    u.fillStyle='#fff';u.font='bold 40px Arial';
+    const seen=new Set();
+    p.letterHints.forEach(h=>{if(seen.has(h.v))return;seen.add(h.v);const vr=Math.floor(h.v/(p.cols+1)),vc=h.v%(p.cols+1);u.fillStyle=p._letterBad.has(h.v)?'#f33':'#fff';u.fillText(h.label,ox+vc*z,oy+vr*z)});
+  });
+  if(allClear){u.fillStyle='#fff';u.font=`bold ${Math.min(innerWidth,innerHeight)*.17}px Arial`;u.textAlign='center';u.fillText('THX.',innerWidth/2,innerHeight/2)}
+}
+function render(){prepareSource();if(fxEnabled)postEffect();else{v.setTransform(fxDpr,0,0,fxDpr,0,0);v.drawImage(source,0,0,source.width,source.height,0,0,innerWidth,innerHeight)}drawUI()}
+let renderScheduled=false;
+function scheduleRender(){
+  if(renderScheduled)return;renderScheduled=true;
+  requestAnimationFrame(()=>{renderScheduled=false;render()});
+}
+function clickPuzzle(e){if(zoom<8||allClear)return;let q=screenToWorld(e.clientX,e.clientY);
+  for(const p of puzzles){if(p.cleared||!p.revealed)continue;let left=p.x-p.cols*CELL/2,top=p.y-p.rows*CELL/2,c=Math.floor((q.x-left)/CELL),r=Math.floor((q.y-top)/CELL);if(r<0||c<0||r>=p.rows||c>=p.cols||!p.active[r]?.[c])continue;
+    const k=r+','+c;
+    if(p.isBorder[r][c]){
+      p.player[k]=p.player[k]==='dot'?'white':p.player[k]==='white'?'black':'dot';
+    }else{
+      p.player[k]=p.player[k]==='white'?'black':p.player[k]==='black'?'dot':'white';
+    }
+    p.cleared=Object.values(p.player).every(x=>x!=='white')&&playerMatchesClues(p)&&playerMatchesAlphabet(p);
+    p.dirty=true;
+    render();
+    
+    if (puzzles.every(x => x.cleared)) {
+      if (currentStageIndex < stages.length - 1) {
+        currentStageIndex++;
+        setTimeout(() => spawnStage(currentStageIndex), 400);
+      } else {
+        allClear = true;
+        render();
+      }
+    }
+    break;
+  }}
+
+const pointers=new Map();let pinchDist=0;
+ui.addEventListener('pointerdown',e=>{
+  pointers.set(e.pointerId,e);ui.setPointerCapture(e.pointerId);
+  if(pointers.size===1){drag={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y,moved:false};}
+  else if(pointers.size===2){
+    let p=Array.from(pointers.values());
+    pinchDist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
+    if(drag)drag.moved=true;
+  }
+});
+ui.addEventListener('pointermove',e=>{
+  if(!pointers.has(e.pointerId))return;
+  pointers.set(e.pointerId,e);
+  if(pointers.size===2){
+    let p=Array.from(pointers.values()), dist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
+    let cx=(p[0].clientX+p[1].clientX)/2, cy=(p[0].clientY+p[1].clientY)/2, ratio=dist/pinchDist;
+    if(ratio>1.4 || ratio<0.7){
+      let before=screenToWorld(cx,cy), i=ZOOMS.indexOf(zoom);
+      zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(ratio>1?1:-1)))];
+      let after=screenToWorld(cx,cy);
+      cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender();
+      pinchDist=dist;
+    }
+  }else if(pointers.size===1&&drag){
+    let dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+    drag.moved||=(Math.abs(dx)+Math.abs(dy)>4);
+    cam.x=drag.cx-dx/zoom;cam.y=drag.cy-dy/zoom;clampCamera();scheduleRender();
+  }
+});
+const pointerUp=e=>{
+  pointers.delete(e.pointerId);
+  if(pointers.size===0){
+    if(drag&&!drag.moved)clickPuzzle(e);
+    drag=null;
+  }else if(pointers.size===1){
+    let p=Array.from(pointers.values())[0];
+    drag={x:p.clientX,y:p.clientY,cx:cam.x,cy:cam.y,moved:true};
+  }
+};
+ui.addEventListener('pointerup',pointerUp);
+ui.addEventListener('pointercancel',pointerUp);
+document.querySelector('#fx-toggle').addEventListener('click',()=>{fxEnabled=!fxEnabled;document.querySelector('#fx-toggle').textContent='FX: '+(fxEnabled?'ON':'OFF');render()});
+ui.addEventListener('wheel',e=>{e.preventDefault();let before=screenToWorld(e.clientX,e.clientY),i=ZOOMS.indexOf(zoom);zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(e.deltaY<0?1:-1)))];let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
+addEventListener('resize',resize);resize();
+
+requestAnimationFrame(()=>{requestAnimationFrame(()=>{spawnStage(0)})});
+
+})();
+</script>
+</html>
