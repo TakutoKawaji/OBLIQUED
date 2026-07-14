@@ -20,13 +20,13 @@ let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=
 const PUZZLE_MAP=
 `____, ____ _ F__Z_ W__K___
 S___Y _ _______ R____N_
-___ _______ A______G_
+___ A______G_
 T_X_ C__V___ J_M_____
 __ P__H___ ______ OBLIQUED_`;
 const WORLD_MAP=
 `WELL_ IT'S A _UZ_Y _AL_.__
 _TRA_ A LITTLE, _ETUR_,
-YET SOMEHOW _RRIVIN_.
+YET _RRIVIN_.
 _E_T _UR_ES, _U_BLES,
 SO _ER_APS THAT'S _______.`;
 function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:c*GRID,y:r*GRID})}});return out}
