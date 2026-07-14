@@ -163,11 +163,20 @@ function revealTiles(newPuzzles, newLetters, onDone) {
     onDone && onDone();
     return;
   }
-  const perFrame = Math.max(1, Math.ceil(queue.length / 72));
+  
+  // アニメーション全体を4秒（4000ms）かけて完了させる
+  const durationMs = 4000; 
+  let startTime = null;
   let idx = 0;
-  function step() {
-    const end = Math.min(queue.length, idx + perFrame);
-    for (; idx < end; idx++) {
+
+  function step(timestamp) {
+    if (!startTime) startTime = timestamp;
+    const elapsed = timestamp - startTime;
+
+    const progress = Math.min(1, Math.max(0, elapsed / durationMs));
+    const targetIdx = Math.floor(progress * queue.length);
+
+    while (idx < targetIdx) {
       const item = queue[idx];
       if (item.type === 'cell') {
         item.p.player[item.key] = item.p.initialPlayer[item.key];
@@ -175,8 +184,11 @@ function revealTiles(newPuzzles, newLetters, onDone) {
       } else {
         item.e.revealedCells.add(item.key);
       }
+      idx++;
     }
+
     render();
+
     if (idx < queue.length) {
       requestAnimationFrame(step);
     } else {
@@ -184,6 +196,7 @@ function revealTiles(newPuzzles, newLetters, onDone) {
       onDone && onDone();
     }
   }
+  
   requestAnimationFrame(step);
 }
 
@@ -354,7 +367,7 @@ function letterMismatchSet(p){
 function telopText(){
   if(zoom===1)return'DRAG TO MOVE';
   if(zoom===2)return'WHEEL TO ZOOM';
-  if(zoom===4)return'CLICK TO CHANGE';
+  if(zoom===4)return'CLICK TO SWITCH';
   return null;
 }
 function drawTelop(){
