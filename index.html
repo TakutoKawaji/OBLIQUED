@@ -15,6 +15,7 @@
 const view=document.querySelector('#view'), ui=document.querySelector('#ui'), v=view.getContext('2d'), u=ui.getContext('2d');
 const source=document.createElement('canvas'), s=source.getContext('2d',{willReadFrequently:true});
 const ZOOMS=[0.5,1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
+function currentZooms(){return allClear?ZOOMS:ZOOMS.filter(z=>z!==0.5)}
 let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
 let jx=0, jy=0;
 const PUZZLE_MAP=
@@ -327,8 +328,19 @@ function letterMismatchSet(p){
   const bad={};Object.entries(p.clues).forEach(([key,n])=>bad[key]=clueMismatch(p,key,n));
   p._clueBad=bad;p._letterBad=letterMismatchSet(p);p.dirty=false;
 }
+function telopText(){
+  if(zoom===1)return'DRAG TO MOVE';
+  if(zoom===2||zoom===4)return'WHEEL TO ZOOM';
+  if(allClear&&(zoom===8||zoom===16))return'WHEEL TO ZOOM';
+  return null;
+}
+function drawTelop(){
+  const text=telopText();if(!text)return;
+  u.fillStyle='#fff';u.font=`bold ${Math.min(innerWidth,innerHeight)*.03}px Arial`;u.textAlign='center';u.textBaseline='middle';
+  u.fillText(text,innerWidth/2,innerHeight-innerHeight*.08);
+}
 function drawUI(){
-  u.setTransform(dpr,0,0,dpr,0,0);u.clearRect(0,0,innerWidth,innerHeight);if(zoom<8)return;
+  u.setTransform(dpr,0,0,dpr,0,0);u.clearRect(0,0,innerWidth,innerHeight);drawTelop();if(zoom<8)return;
   u.strokeStyle='#fff';u.fillStyle='#fff';u.lineWidth=1;u.font='44px Arial';u.textAlign='center';u.textBaseline='middle';
   puzzles.forEach(p=>{
     if(!inViewport(p.x,p.y))return;
@@ -400,8 +412,8 @@ ui.addEventListener('pointermove',e=>{
     let p=Array.from(pointers.values()), dist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
     let cx=(p[0].clientX+p[1].clientX)/2, cy=(p[0].clientY+p[1].clientY)/2, ratio=dist/pinchDist;
     if(ratio>1.4 || ratio<0.7){
-      let before=screenToWorld(cx,cy), i=ZOOMS.indexOf(zoom);
-      zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(ratio>1?1:-1)))];
+      let zooms=currentZooms(), before=screenToWorld(cx,cy), i=zooms.indexOf(zoom);
+      zoom=zooms[Math.max(0,Math.min(zooms.length-1,i+(ratio>1?1:-1)))];
       fxEnabled = (zoom !== 0.5);
       let after=screenToWorld(cx,cy);
       cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender();
@@ -425,7 +437,7 @@ const pointerUp=e=>{
 };
 ui.addEventListener('pointerup',pointerUp);
 ui.addEventListener('pointercancel',pointerUp);
-ui.addEventListener('wheel',e=>{e.preventDefault();let before=screenToWorld(e.clientX,e.clientY),i=ZOOMS.indexOf(zoom);zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(e.deltaY<0?1:-1)))];fxEnabled=(zoom!==0.5);let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
+ui.addEventListener('wheel',e=>{e.preventDefault();let zooms=currentZooms(),before=screenToWorld(e.clientX,e.clientY),i=zooms.indexOf(zoom);zoom=zooms[Math.max(0,Math.min(zooms.length-1,i+(e.deltaY<0?1:-1)))];fxEnabled=(zoom!==0.5);let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
 addEventListener('resize',resize);resize();
 
 requestAnimationFrame(()=>{requestAnimationFrame(()=>{spawnStage(0)})});
