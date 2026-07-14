@@ -7,25 +7,24 @@
   html,body{margin:0;overflow:hidden;background:#000;height:100%;font-family:Arial,sans-serif}
   canvas{position:fixed;inset:0;width:100%;height:100%;touch-action:none}
   #view{z-index:1}#ui{z-index:2}
-  #fx-toggle{position:fixed;z-index:4;right:14px;bottom:14px;padding:7px 10px;background:#000;color:#fff;border:1px solid #fff;font:12px Arial;letter-spacing:.08em;cursor:pointer}
 </style>
-<canvas id="view"></canvas><canvas id="ui"></canvas><button id="fx-toggle">FX: ON</button>
+<canvas id="view"></canvas><canvas id="ui"></canvas>
 <script src="puzzle-data.js" onerror="console.log('[OBLIQUE] puzzle-data.js not found. Open generator.html to create it.')"></script>
 <script>
 (()=>{'use strict';
 const view=document.querySelector('#view'), ui=document.querySelector('#ui'), v=view.getContext('2d'), u=ui.getContext('2d');
 const source=document.createElement('canvas'), s=source.getContext('2d',{willReadFrequently:true});
-const ZOOMS=[1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
+const ZOOMS=[0.5,1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
 let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
 let jx=0, jy=0;
 const PUZZLE_MAP=
-`____,_W__K__F__Z__
+`____,_W__K_F__Z__
 S___Y________R____N_
 ________A______G_
 T_X__C__V____J_M_____
 P__H_______OBLIQUED_`;
 const WORLD_MAP=
-`WELL_ _AL_ _UZ_Y.____
+`WELL_ _AL_ _UZ_Y.___
 _TRA_ A BIT, _ETUR_,
 SOMEHOW _RRIVIN_.
 _E_T _UR_ES, _U_BLES,
@@ -35,7 +34,7 @@ _ER_APS IT ________.`;
 // at GRID=128), with a safety margin, so no two adjacent text glyphs can touch. Puzzle
 // columns always keep the full GRID width since a puzzle's own 16x16 grid can't shrink
 // without distorting its diagonal tile art, so this also guarantees puzzles never overlap.
-const TEXT_STEP=112;
+const TEXT_STEP=92;
 const PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n');
 const ROW_WIDTH=[];
 const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
@@ -47,7 +46,7 @@ const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
 function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:ROW_CENTER_X[r][c],y:r*GRID})}});return out}
 
 class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){while(this.p[x]!==x){this.p[x]=this.p[this.p[x]];x=this.p[x]}return x}union(a,b){a=this.find(a);b=this.find(b);if(a!==b)this.p[a]=b}}
-function vertexClues(active,diag,rows,cols){const out={};for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const d=diag[r+','+c],v=d==='black'?[[r,c],[r+1,c+1]]:[[r,c+1],[r+1,c]];v.forEach(([y,x])=>out[y+','+x]=(out[y+','+x]||0)+1)}return out}
+function vertexClues(active,diag,rows,cols){const out={};for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const d=diag[r+','+c],v=d==='black'?[[r,c],[r+1,c+1]]:[[r,c+1],[r+1,c]];v.forEach(([y,x])=>out[y+x]=(out[y+','+x]||0)+1)}return out}
 function letterName(i){return String.fromCharCode(65+i)}
 function alphabetHints(active,diag,rows,cols){const dsu=new DSU((rows+1)*(cols+1)),edges=[];const id=(r,c)=>r*(cols+1)+c;for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const slash=diag[r+','+c]==='dot';dsu.union(slash?id(r,c+1):id(r,c),slash?id(r+1,c):id(r+1,c+1));if(r===0||!active[r-1][c])edges.push({r,c,side:'top',v:slash?id(r,c+1):id(r,c)});if(r===rows-1||!active[r+1][c])edges.push({r,c,side:'bottom',v:slash?id(r+1,c):id(r+1,c+1)});if(c===0||!active[r][c-1])edges.push({r,c,side:'left',v:slash?id(r+1,c):id(r,c)});if(c===cols-1||!active[r][c+1])edges.push({r,c,side:'right',v:slash?id(r+1,c+1):id(r,c+1)})}
   const groups={};edges.forEach(e=>(groups[dsu.find(e.v)]??=[]).push(e));let n=0,out=[];Object.values(groups).forEach(g=>{if(g.length>1){const label=letterName(n++);g.forEach(e=>out.push({...e,label}))}});return out}
@@ -62,8 +61,6 @@ function computeCluesExcludingLetters(active,answer,rows,cols){
 function playerMatchesClues(p){const c=vertexClues(p.active,p.player,p.rows,p.cols);return Object.entries(p.clues).every(([k,n])=>(c[k]||0)===n)}
 function playerMatchesAlphabet(p){const got=alphabetHints(p.active,p.player,p.rows,p.cols),a={};got.forEach(e=>(a[e.label]??=[]).push(e.v));const want={};p.letterHints.forEach(e=>(want[e.label]??=[]).push(e.v));return Object.keys(want).every(k=>a[k]&&a[k].length===want[k].length&&a[k].every(v=>want[k].includes(v)))}
 function vertexOptions(active,rows,cols,vr,vc){const q=[];[[vr-1,vc-1,'black'],[vr-1,vc,'dot'],[vr,vc-1,'dot'],[vr,vc,'black']].forEach(([r,c,state])=>{if(r>=0&&c>=0&&r<rows&&c<cols&&active[r][c])q.push({key:r+','+c,state})});return q}
-// NOTE: puzzle generation (solveUnique / edgeOK / generatePuzzleLoops) lives in generator.html now.
-// The game only ever reads pre-solved puzzles from PUZZLE_CACHE (puzzle-data.js); it never solves anything at runtime.
 
 function computeActiveGrid(ch){
   const rows=16,cols=16,scale=40,mask=document.createElement('canvas'),m=mask.getContext('2d');
@@ -106,9 +103,6 @@ function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));c
 const puzzleEntries=parseGrid(PUZZLE_MAP), worldLetters=parseGrid(WORLD_MAP);
 puzzleEntries.forEach((e, i) => e.globalIndex = i);
 
-// Stages are chunked by punctuation in reading order (row, then column), not by column gaps.
-// Each stage covers everything since the previous ',' or '.' up to and including the next one —
-// whether that punctuation mark itself is a plain-text glyph or a puzzle to solve.
 const allEntries=[...puzzleEntries.map(e=>({e,kind:'puzzle'})), ...worldLetters.map(e=>({e,kind:'letter'}))]
   .sort((a,b)=>a.e.r-b.e.r||a.e.c-b.e.c);
 
@@ -248,10 +242,6 @@ function drawWorldLetterSource(e){
     s.drawImage(glyph,c*cellPx,r*cellPx,cellPx,cellPx,ox+c*cellSize,oy+r*cellSize,cellSize,cellSize);
   });
 }
-// 'dot' cells are drawn as a smaller rect nested inside the outer square, in the SAME path as
-// the outer square. With fillRule='evenodd' the nested rect becomes an unfilled hole rather than
-// needing its own black fill pass — the cleared black background already shows through it. Same
-// visual role as the old white-square-plus-black-circle, one rect shape instead of a circle.
 function drawPuzzleSource(p,cells){
   const g=worldToScreen(p.x,p.y), size=CELL*zoom;
   const ox=g.x-p.cols*size/2, oy=g.y-p.rows*size/2;
@@ -265,7 +255,6 @@ function drawPuzzleSource(p,cells){
   }
 }
 function addTileShape(path,x,y,size,kind){
-  // 'mixed' isn't drawn here — it's the same shape as 'black', just rotated 90°, baked once in getTileBitmaps.
   const q=size/4;
   const bands=kind==='black'
     ? [[[0,q],[3*q,size],[q,size],[0,3*q]],[[q,0],[size,3*q],[size,q],[3*q,0]]]
@@ -413,6 +402,7 @@ ui.addEventListener('pointermove',e=>{
     if(ratio>1.4 || ratio<0.7){
       let before=screenToWorld(cx,cy), i=ZOOMS.indexOf(zoom);
       zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(ratio>1?1:-1)))];
+      fxEnabled = (zoom !== 0.5);
       let after=screenToWorld(cx,cy);
       cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender();
       pinchDist=dist;
@@ -435,8 +425,7 @@ const pointerUp=e=>{
 };
 ui.addEventListener('pointerup',pointerUp);
 ui.addEventListener('pointercancel',pointerUp);
-document.querySelector('#fx-toggle').addEventListener('click',()=>{fxEnabled=!fxEnabled;document.querySelector('#fx-toggle').textContent='FX: '+(fxEnabled?'ON':'OFF');render()});
-ui.addEventListener('wheel',e=>{e.preventDefault();let before=screenToWorld(e.clientX,e.clientY),i=ZOOMS.indexOf(zoom);zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(e.deltaY<0?1:-1)))];let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
+ui.addEventListener('wheel',e=>{e.preventDefault();let before=screenToWorld(e.clientX,e.clientY),i=ZOOMS.indexOf(zoom);zoom=ZOOMS[Math.max(0,Math.min(ZOOMS.length-1,i+(e.deltaY<0?1:-1)))];fxEnabled=(zoom!==0.5);let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
 addEventListener('resize',resize);resize();
 
 requestAnimationFrame(()=>{requestAnimationFrame(()=>{spawnStage(0)})});
