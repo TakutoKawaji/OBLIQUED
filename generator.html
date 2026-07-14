@@ -20,22 +20,26 @@
     「Generate」を押すと PUZZLE_MAP 上の全パズルを生成し、<code>puzzle-data.js</code> としてダウンロードします。<br>
     出力したファイルを index.html と同じフォルダに置くと、ゲーム側は解の探索を一切行わずキャッシュを読むだけになります。
   </p>
-  <button id="go">Generate puzzle-data.js</button>
+  <p>
+    既存の <code>puzzle-data.js</code> を読み込むと、そこに含まれるパズルはスキップし、未生成のものだけを作成して上書き保存します。<br>
+    読み込まない場合は全パズルを新規生成します。
+  </p>
+  <input type="file" id="loadFile" accept=".js">
+  <div id="loadStatus" style="margin-top:8px;color:#999;font-size:12px"></div>
+  <div style="margin-top:16px">
+    <button id="go">Generate / Update puzzle-data.js</button>
+  </div>
   <div id="log"></div>
 </div>
 <script>
 'use strict';
 const GRID=128;
 const PUZZLE_MAP=
-`____,_________W__K
-______________S__Y
-______________C__V
-______R____N
-____A______G
-______F_D
-______J_M
-______P_Z
-______________________OBLIQUE`;
+`____,_W__K_F__Z__
+S___Y________R____N_
+________A______G_
+T_X__C__V____J_M_____
+P__H_______OBLIQUED_`;
 function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:c*GRID,y:r*GRID})}});return out}
 
 class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){while(this.p[x]!==x){this.p[x]=this.p[this.p[x]];x=this.p[x]}return x}union(a,b){a=this.find(a);b=this.find(b);if(a!==b)this.p[a]=b}}
@@ -71,12 +75,52 @@ const puzzleEntries=parseGrid(PUZZLE_MAP);
 puzzleEntries.forEach((e,i)=>e.globalIndex=i);
 
 const logEl=document.getElementById('log'), btn=document.getElementById('go');
+const loadFileEl=document.getElementById('loadFile'), loadStatusEl=document.getElementById('loadStatus');
 function log(line,cls){const d=document.createElement('div');if(cls)d.className=cls;d.textContent=line;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight}
 
+let existingData=null; // parsed {index: {...}} from a loaded puzzle-data.js, or null if none loaded
+
+function parsePuzzleDataText(text){
+  // puzzle-data.js is `window.PUZZLE_CACHE = {...};` — extract the object literal safely.
+  const m=text.match(/PUZZLE_CACHE\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
+  if(!m) throw new Error('PUZZLE_CACHE assignment not found in file');
+  return JSON.parse(m[1]);
+}
+
+loadFileEl.addEventListener('change',()=>{
+  const file=loadFileEl.files[0];
+  if(!file){existingData=null;loadStatusEl.textContent='';return}
+  const reader=new FileReader();
+  reader.onload=()=>{
+    try{
+      existingData=parsePuzzleDataText(reader.result);
+      const n=Object.keys(existingData).length;
+      loadStatusEl.textContent=`loaded ${file.name}: ${n} existing puzzle(s) — these will be skipped`;
+      loadStatusEl.style.color='#6f6';
+    }catch(err){
+      existingData=null;
+      loadStatusEl.textContent=`failed to parse ${file.name}: ${err.message}`;
+      loadStatusEl.style.color='#f66';
+    }
+  };
+  reader.onerror=()=>{
+    existingData=null;
+    loadStatusEl.textContent=`failed to read ${file.name}`;
+    loadStatusEl.style.color='#f66';
+  };
+  reader.readAsText(file);
+});
+
 function generateAll(){
-  const data={},total=puzzleEntries.length;
-  log(`generating ${total} puzzles...`);
+  const data={...(existingData||{})},total=puzzleEntries.length;
+  const skipCount=puzzleEntries.filter(e=>data[e.globalIndex]!==undefined).length;
+  if(skipCount>0) log(`${skipCount}/${total} puzzles already present — skipping those, generating the rest...`);
+  else log(`generating ${total} puzzles...`);
   puzzleEntries.forEach((e,i)=>{
+    if(data[e.globalIndex]!==undefined){
+      log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) already exists — skipped`);
+      return;
+    }
     const t0=performance.now();
     const {rows,cols,active}=computeActiveGrid(e.ch);
     const g=generatePuzzleLoops(active,rows,cols,e.globalIndex);
