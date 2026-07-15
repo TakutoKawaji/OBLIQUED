@@ -33,7 +33,6 @@ YET SOMEHOW _RRIVIN_.
 _E_T _UR_ES, _U_BLES,
 _ER_APS IT ________.`;
 
-// 最適化: 不要な配列を削除し、最大幅を保持する変数を用意
 const TEXT_STEP=96, PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n');
 let maxRowWidth = 0; 
 
@@ -68,13 +67,30 @@ function playerMatchesClues(p){const c=vertexClues(p.active,p.player,p.rows,p.co
 function playerMatchesAlphabet(p){const got=alphabetHints(p.active,p.player,p.rows,p.cols),a={};got.forEach(e=>(a[e.label]??=[]).push(e.v));const want={};p.letterHints.forEach(e=>(want[e.label]??=[]).push(e.v));return Object.keys(want).every(k=>a[k]&&a[k].length===want[k].length&&a[k].every(v=>want[k].includes(v)))}
 function vertexOptions(active,rows,cols,vr,vc){const q=[];[[vr-1,vc-1,'black'],[vr-1,vc,'dot'],[vr,vc-1,'dot'],[vr,vc,'black']].forEach(([r,c,state])=>{if(r>=0&&c>=0&&r<rows&&c<cols&&active[r][c])q.push({key:r+','+c,state})});return q}
 
+// 最適化: 1pxずつ測るのではなく二分探索で最大フォントサイズを求める(measureText呼び出しを大幅削減)
+function fitFontSize(ctx,ch,maxSize,maxWidth,bold){
+  const prefix=bold?'bold ':'';
+  let lo=1,hi=Math.max(1,Math.floor(maxSize)),best=lo;
+  while(lo<=hi){
+    const mid=(lo+hi)>>1;
+    ctx.font=`${prefix}${mid}px Arial`;
+    if(ctx.measureText(ch).width<=maxWidth){best=mid;lo=mid+1}else{hi=mid-1}
+  }
+  ctx.font=`${prefix}${best}px Arial`;
+  return best;
+}
+
 function computeActiveGrid(ch){
+  // needActiveフラグの処理を削除（キャッシュがない時だけ呼ばれるため常に全計算する）
   const rows=16,cols=16,scale=40,mask=document.createElement('canvas'),m=mask.getContext('2d');
-  mask.width=cols*scale;mask.height=rows*scale;m.fillStyle='#000';m.fillRect(0,0,mask.width,mask.height);m.fillStyle='#fff';m.textAlign='center';m.textBaseline='middle';let fontSize=mask.height*.99;m.font=`bold ${fontSize}px Arial`;while(m.measureText(ch).width>mask.width*.97){fontSize-=1;m.font=`bold ${fontSize}px Arial`};m.fillText(ch,mask.width/2,mask.height/2+fontSize*.02);
+  mask.width=cols*scale;mask.height=rows*scale;m.fillStyle='#000';m.fillRect(0,0,mask.width,mask.height);m.fillStyle='#fff';m.textAlign='center';m.textBaseline='middle';
+  const fontSize=fitFontSize(m,ch,mask.height*.99,mask.width*.97,true);
+  m.fillText(ch,mask.width/2,mask.height/2+fontSize*.02);
   const pixels=m.getImageData(0,0,mask.width,mask.height).data,active=[],isBorder=[];
   for(let r=0;r<rows;r++){active[r]=[];isBorder[r]=[];for(let c=0;c<cols;c++){
     let white=0;for(let yy=0;yy<scale;yy++)for(let xx=0;xx<scale;xx++)white+=pixels[((r*scale+yy)*mask.width+c*scale+xx)*4];
     active[r][c]=white/(scale*scale)>96;
+    
     let min=255;
     for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){
       let px=~~(c*scale + scale*xx), py=~~(r*scale + scale*yy);
@@ -82,36 +98,47 @@ function computeActiveGrid(ch){
     }
     isBorder[r][c] = min <= 210;
   }}
-  return {rows,cols,scale,mask,active,isBorder};
+  return {rows,cols,active,isBorder};
 }
-function applyBakedShape(rows,cols,isBorder,shapeKeys){
-  const keep=new Set(shapeKeys),active=[],border=[];
-  for(let r=0;r<rows;r++){active[r]=[];border[r]=[];for(let c=0;c<cols;c++){
-    const on=keep.has(r+','+c);
-    active[r][c]=on;
-    border[r][c]=on&&isBorder[r][c]; // 最適化: 冗長な !!(isBorder[r]&&...) を削除
-  }}
-  return {active,isBorder:border};
-}
+
 function makePuzzle(ch,index,x,y){
-  const {rows,cols,scale,mask,active:fontActive,isBorder:fontBorder}=computeActiveGrid(ch);
-  let active=fontActive,isBorder=fontBorder;
   const cached=window.PUZZLE_CACHE&&window.PUZZLE_CACHE[index];
-  if(cached&&cached.shape){
-    ({active,isBorder}=applyBakedShape(rows,cols,isBorder,cached.shape));
+  // shapeに加えて、borderのキャッシュがあるかを確認
+  const hasBakedShape=!!(cached&&cached.shape&&cached.border);
+  
+  let rows=16, cols=16, active=[], isBorder=[];
+
+  if(hasBakedShape){
+    // キャッシュがある場合はCanvas解析を完全にスキップ
+    const shapeSet=new Set(cached.shape);
+    const borderSet=new Set(cached.border);
+    for(let r=0;r<rows;r++){
+      active[r]=[]; isBorder[r]=[];
+      for(let c=0;c<cols;c++){
+        const key = r+','+c;
+        active[r][c] = shapeSet.has(key);
+        isBorder[r][c] = borderSet.has(key);
+      }
+    }
+  } else {
+    // キャッシュがない場合のみフォールバックで計算
+    const res = computeActiveGrid(ch);
+    rows=res.rows; cols=res.cols; active=res.active; isBorder=res.isBorder;
   }
+
   const answer={},initialPlayer={};
   for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){
     const key=r+','+c;
     answer[key]=((r*7+c*3+index)%2?'black':'dot');
     initialPlayer[key]=isBorder[r][c]?'dot':'white';
   }
+  
   if(cached)Object.assign(answer,cached.answer);
-  const fallback=computeCluesExcludingLetters(active,answer,rows,cols);
+  const fallback=cached?null:computeCluesExcludingLetters(active,answer,rows,cols);
   const clues=cached?cached.clues:fallback.full,letterHints=cached?cached.letterHints:fallback.letters;
-  return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false,mask,scale};
+  
+  return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false};
 }
-
 // 最適化: PUZZLE_MAP.split('\n') の重複処理を排除し、先ほどの maxRowWidth を活用
 const MAP_ROWS = PUZZLE_LINES.length; 
 const PADDING_X = 64;const PADDING_Y = 64;
@@ -135,7 +162,6 @@ allEntries.forEach(({e,kind})=>{
   }
 });
 if(curPuzzles.length||curLetters.length)stages.push({puzzles:curPuzzles,letters:curLetters});
-stages.forEach((stage,i)=>stage.puzzles.forEach(p=>p.stageIndex=i));
 
 const puzzles = [], activeWorldLetters = [];
 let currentStageIndex = 0;
@@ -205,8 +231,7 @@ function getGlyph(ch){
   cv.width=cv.height=size;
   g.fillStyle='#000';g.fillRect(0,0,size,size);
   g.textAlign='center';g.textBaseline='middle';
-  let fontSize=size*.95;g.font=`${fontSize}px Arial`;
-  while(g.measureText(ch).width>size*.85){fontSize-=1;g.font=`${fontSize}px Arial`}
+  const fontSize=fitFontSize(g,ch,size*.95,size*.85,false);
   g.strokeStyle='#fff';g.lineWidth=size*.01;g.lineJoin='round';g.strokeText(ch,size/2,size/2+fontSize*.02);
   glyphCache.set(ch,cv);return cv;
 }
@@ -294,11 +319,16 @@ function postEffect(){
   if(source.width<=0||source.height<=0||innerWidth<=0||innerHeight<=0)return;
   v.resetTransform();
   const t=BASE_TILE*zoom, phaseX=(((innerWidth/2-cam.x*zoom)%t)+t)%t, phaseY=(((innerHeight/2-cam.y*zoom)%t)+t)%t;
-  const tiles=getTileBitmaps(zoom);
-  v.save();v.translate(phaseX-t,phaseY-t);v.fillStyle=v.createPattern(tiles.white,'repeat');v.fillRect(-(phaseX-t),-(phaseY-t),innerWidth,innerHeight);v.restore();
+  const tiles=getTileBitmaps(zoom), ox=phaseX-t, oy=phaseY-t;
+  const fillPattern=(bitmap)=>{v.save();v.translate(ox,oy);v.fillStyle=v.createPattern(bitmap,'repeat');v.fillRect(-ox,-oy,innerWidth,innerHeight);v.restore()};
+  fillPattern(tiles.white);
   if(!cachedImageData)cachedImageData=s.getImageData(0,0,source.width,source.height).data;
   const data=cachedImageData, sw=source.width, sh=source.height;
-  for(let y=phaseY-t;y<innerHeight;y+=t)for(let x=phaseX-t;x<innerWidth;x+=t){
+  // 最適化: 個々のタイルを drawImage せず、黒/混合タイルの矩形を Path2D にまとめて
+  // 最後にクリップ+パターン塗りつぶし2回で描画する(drawPuzzleSourceと同様の手法)
+  const blackPath=new Path2D(), mixedPath=new Path2D();
+  let hasBlack=false, hasMixed=false;
+  for(let y=oy;y<innerHeight;y+=t)for(let x=ox;x<innerWidth;x+=t){
     let min=255,max=0;
     for(const yy of TILE_SAMPLE_OFFSETS)for(const xx of TILE_SAMPLE_OFFSETS){
       let px=~~(x+t*xx+jx), py=~~(y+t*yy+jy);
@@ -308,9 +338,12 @@ function postEffect(){
       if(bright<min)min=bright;
       if(bright>max)max=bright;
     }
-    const kind=min===255?'white':max===0?'black':'mixed';
-    if(kind!=='white')v.drawImage(tiles[kind],x,y);
+    if(min===255)continue;
+    if(max===0){blackPath.rect(x,y,t,t);hasBlack=true}
+    else{mixedPath.rect(x,y,t,t);hasMixed=true}
   }
+  if(hasBlack){v.save();v.clip(blackPath);fillPattern(tiles.black);v.restore()}
+  if(hasMixed){v.save();v.clip(mixedPath);fillPattern(tiles.mixed);v.restore()}
 }
 function clueMismatch(p,vk,target){
   const [vr,vc]=vk.split(',').map(Number),opts=vertexOptions(p.active,p.rows,p.cols,vr,vc);
@@ -362,14 +395,26 @@ function drawTelop(){
 }
 function drawUI(){
   u.setTransform(dpr,0,0,dpr,0,0);u.clearRect(0,0,innerWidth,innerHeight);drawTelop();if(zoom<8)return;
-  u.strokeStyle='#fff';u.fillStyle='#fff';u.lineWidth=1;u.font='44px Arial';u.textAlign='center';u.textBaseline='middle';
-  puzzles.forEach(p=>{
-    if(!inViewport(p.x,p.y))return;
+  u.strokeStyle='#fff';u.lineWidth=1;
+  const z=CELL*zoom;
+  // 最適化: worldToScreen等の座標計算をパズルごとに1回だけ行い、枠線/数字/文字の3ループで使い回す
+  const layouts=puzzles.filter(p=>inViewport(p.x,p.y)).map(p=>{
     refreshMismatchCache(p);
-    const g=worldToScreen(p.x,p.y),z=CELL*zoom,ox=g.x-p.cols*z/2,oy=g.y-p.rows*z/2;
-    for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c])u.strokeRect(ox+c*z+.5,oy+r*z+.5,z-1,z-1);
+    const g=worldToScreen(p.x,p.y);
+    return {p,ox:g.x-p.cols*z/2,oy:g.y-p.rows*z/2};
+  });
+  const gridPath=new Path2D();
+  layouts.forEach(({p,ox,oy})=>{
+    for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c])gridPath.rect(ox+c*z+.5,oy+r*z+.5,z-1,z-1);
+  });
+  u.stroke(gridPath);
+  u.textAlign='center';u.textBaseline='middle';
+  u.font='44px Arial';
+  layouts.forEach(({p,ox,oy})=>{
     Object.entries(p.clues).forEach(([key,n])=>{let [r,c]=key.split(',').map(Number);u.fillStyle=p._clueBad[key]?'#f33':'#fff';u.fillText(n,ox+c*z,oy+r*z)});
-    u.fillStyle='#fff';u.font='bold 40px Arial';
+  });
+  u.font='bold 40px Arial';
+  layouts.forEach(({p,ox,oy})=>{
     const seen=new Set();
     p.letterHints.forEach(h=>{if(seen.has(h.v))return;seen.add(h.v);const vr=~~(h.v/(p.cols+1)),vc=h.v%(p.cols+1);u.fillStyle=p._letterBad.has(h.v)?'#f33':'#fff';u.fillText(h.label,ox+vc*z,oy+vr*z)});
   });
