@@ -14,6 +14,12 @@
 (()=>{'use strict';
 const view=document.querySelector('#view'), ui=document.querySelector('#ui'), v=view.getContext('2d'), u=ui.getContext('2d');
 const source=document.createElement('canvas'), s=source.getContext('2d',{willReadFrequently:true});
+const moire=document.createElement('canvas'), mo=moire.getContext('2d');
+// MOIRE_BLOCK: size (in CSS px) of one moire-sample block. Fixed regardless of zoom, so the
+// effect is strong when many tile periods fit inside a block (zoomed-out / dense view, like the
+// X thumbnail) and fades out once a tile period exceeds the block (zoomed-in / clean lines).
+// Lower = finer/subtler moire, higher = coarser/stronger swirl. Tune to taste.
+const MOIRE_BLOCK=1.15
 const ZOOMS=[0.5,1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
 function currentZooms(){return allClear?ZOOMS:ZOOMS.filter(z=>z!==0.5)}
 let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
@@ -251,6 +257,7 @@ function resize(){
   dpr=Math.min(devicePixelRatio||1,2);fxDpr=1;
   ui.width=Math.max(1,Math.round(innerWidth*dpr));ui.height=Math.max(1,Math.round(innerHeight*dpr));
   [view,source].forEach(c=>{c.width=Math.max(1,Math.round(innerWidth*fxDpr));c.height=Math.max(1,Math.round(innerHeight*fxDpr))});
+  moire.width=Math.max(1,Math.round(view.width/MOIRE_BLOCK));moire.height=Math.max(1,Math.round(view.height/MOIRE_BLOCK));
   if(!cameraInitialized&&innerWidth>0&&innerHeight>0){cam.x=WORLD_MIN_X;cam.y=WORLD_MIN_Y;cameraInitialized=true}
   clampCamera();
   render();
@@ -393,7 +400,22 @@ function drawUI(){
   });
   if(allClear){u.fillStyle='#fff';u.font=`bold ${Math.min(innerWidth,innerHeight)*.17}px Arial`;u.textAlign='center';u.fillText('THX.',innerWidth/2,innerHeight/2)}
 }
-function render(){prepareSource();if(fxEnabled)postEffect();else{v.setTransform(fxDpr,0,0,fxDpr,0,0);v.drawImage(source,0,0,source.width,source.height,0,0,innerWidth,innerHeight)}drawUI()}
+function applyMoire(){
+  if(moire.width<=0||moire.height<=0)return;
+  // Step 1: decimate the sharp render down to a tiny buffer with smoothing OFF (point sampling).
+  // With no low-pass filter, any tile period smaller than a block aliases into new low-frequency
+  // beat patterns -- this is exactly what happened when the video got downscaled for the thumbnail.
+  mo.imageSmoothingEnabled=false;
+  mo.clearRect(0,0,moire.width,moire.height);
+  mo.drawImage(view,0,0,view.width,view.height,0,0,moire.width,moire.height);
+  // Step 2: blow the tiny aliased buffer back up to full size with smoothing ON, matching how a
+  // video player interpolates a low-res thumbnail into that soft "gradient" look.
+  v.setTransform(fxDpr,0,0,fxDpr,0,0);
+  v.imageSmoothingEnabled=true;
+  v.clearRect(0,0,innerWidth,innerHeight);
+  v.drawImage(moire,0,0,moire.width,moire.height,0,0,innerWidth,innerHeight);
+}
+function render(){prepareSource();if(fxEnabled)postEffect();else{v.setTransform(fxDpr,0,0,fxDpr,0,0);v.drawImage(source,0,0,source.width,source.height,0,0,innerWidth,innerHeight)}if(fxEnabled)applyMoire();drawUI()}
 let renderScheduled=false;
 function scheduleRender(){
   if(renderScheduled)return;renderScheduled=true;
