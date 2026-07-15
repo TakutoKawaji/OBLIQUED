@@ -33,7 +33,10 @@ YET SOMEHOW _RRIVIN_.
 _E_T _UR_ES, _U_BLES,
 _ER_APS IT ________.`;
 
-const TEXT_STEP=96, PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n'), ROW_WIDTH=[];
+// 最適化: 不要な配列を削除し、最大幅を保持する変数を用意
+const TEXT_STEP=96, PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n');
+let maxRowWidth = 0; 
+
 const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
   const wline=WORLD_LINES[r]||'', len=Math.max(pline.length,wline.length),centers=[];let x=0;
   for(let c=0;c<len;c++){
@@ -42,7 +45,7 @@ const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
     const w=isPuzzle?GRID:(wc===' '||wc==='.'||wc===',')?32:TEXT_STEP;
     centers[c]=x+w/2;x+=w
   }
-  ROW_WIDTH[r]=x;
+  if (x > maxRowWidth) maxRowWidth = x; // 最大幅を更新
   return centers;
 });
 function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:ROW_CENTER_X[r][c],y:r*GRID})}});return out}
@@ -86,7 +89,7 @@ function applyBakedShape(rows,cols,isBorder,shapeKeys){
   for(let r=0;r<rows;r++){active[r]=[];border[r]=[];for(let c=0;c<cols;c++){
     const on=keep.has(r+','+c);
     active[r][c]=on;
-    border[r][c]=on&&!!(isBorder[r]&&isBorder[r][c]);
+    border[r][c]=on&&isBorder[r][c]; // 最適化: 冗長な !!(isBorder[r]&&...) を削除
   }}
   return {active,isBorder:border};
 }
@@ -109,9 +112,12 @@ function makePuzzle(ch,index,x,y){
   return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false,mask,scale};
 }
 
-const MAP_LINES=PUZZLE_MAP.split('\n'), MAP_ROWS=MAP_LINES.length;const PADDING_X = 64;const PADDING_Y = 64;
-const WORLD_MIN_X = -PADDING_X;const WORLD_MAX_X = Math.max(...ROW_WIDTH) + PADDING_X;
-const WORLD_MIN_Y = -(PADDING_Y + GRID/2);const WORLD_MAX_Y = (MAP_ROWS - 1) * GRID + (PADDING_Y + GRID/2);function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
+// 最適化: PUZZLE_MAP.split('\n') の重複処理を排除し、先ほどの maxRowWidth を活用
+const MAP_ROWS = PUZZLE_LINES.length; 
+const PADDING_X = 64;const PADDING_Y = 64;
+const WORLD_MIN_X = -PADDING_X;const WORLD_MAX_X = maxRowWidth + PADDING_X; 
+const WORLD_MIN_Y = -(PADDING_Y + GRID/2);const WORLD_MAX_Y = (MAP_ROWS - 1) * GRID + (PADDING_Y + GRID/2);
+function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
 
 const puzzleEntries=parseGrid(PUZZLE_MAP), worldLetters=parseGrid(WORLD_MAP);
 puzzleEntries.forEach((e, i) => e.globalIndex = i);
@@ -390,7 +396,11 @@ let shimmerFrame=0;
 const SHIMMER_EVERY=2;
 function shimmerLoop(){
   shimmerFrame++;
-  if(fxEnabled&&shimmerFrame%SHIMMER_EVERY===0){jx=(Math.random()-.5)*1.2;jy=(Math.random()-.5)*1.2;scheduleRender()}
+  // 最適化: fxEnabled の条件を先頭にまとめることで計算をクリーンに
+  if(fxEnabled && shimmerFrame%SHIMMER_EVERY===0){
+    jx=(Math.random()-.5)*1.2;jy=(Math.random()-.5)*1.2;
+    scheduleRender();
+  }
   requestAnimationFrame(shimmerLoop);
 }
 requestAnimationFrame(shimmerLoop);
@@ -412,13 +422,17 @@ const pointers=new Map();let pinchDist=0;
 ui.addEventListener('pointerdown',e=>{
   pointers.set(e.pointerId,e);ui.setPointerCapture(e.pointerId);
   if(pointers.size===1)drag={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y,moved:false};
-  else if(pointers.size===2){let p=Array.from(pointers.values());pinchDist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);if(drag)drag.moved=true}
+  else if(pointers.size===2){
+    let p=[...pointers.values()]; // 最適化: Array.from(...) をスプレッド構文に変更
+    pinchDist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
+    if(drag)drag.moved=true;
+  }
 });
 ui.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId))return;
   pointers.set(e.pointerId,e);
   if(pointers.size===2){
-    let p=Array.from(pointers.values()), dist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
+    let p=[...pointers.values()], dist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
     let cx=(p[0].clientX+p[1].clientX)/2, cy=(p[0].clientY+p[1].clientY)/2, ratio=dist/pinchDist;
     if(ratio>1.4 || ratio<0.7){
       let before=screenToWorld(cx,cy), i=activeZooms.indexOf(zoom);
@@ -437,7 +451,10 @@ ui.addEventListener('pointermove',e=>{
 const pointerUp=e=>{
   pointers.delete(e.pointerId);
   if(pointers.size===0){if(drag&&!drag.moved)clickPuzzle(e);drag=null}
-  else if(pointers.size===1){let p=Array.from(pointers.values())[0];drag={x:p.clientX,y:p.clientY,cx:cam.x,cy:cam.y,moved:true}}
+  else if(pointers.size===1){
+    let p=[...pointers.values()][0];
+    drag={...drag, x:p.clientX, y:p.clientY, cx:cam.x, cy:cam.y, moved:true};
+  }
 };
 ['pointerup','pointercancel'].forEach(ev=>ui.addEventListener(ev,pointerUp));
 ui.addEventListener('wheel',e=>{e.preventDefault();let before=screenToWorld(e.clientX,e.clientY),i=activeZooms.indexOf(zoom);zoom=activeZooms[Math.max(0,Math.min(activeZooms.length-1,i+(e.deltaY<0?1:-1)))];fxEnabled=(zoom!==0.5);let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
