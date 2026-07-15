@@ -36,7 +36,12 @@ _ER_APS IT ________.`;
 const TEXT_STEP=96, PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n'), ROW_WIDTH=[];
 const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
   const wline=WORLD_LINES[r]||'', len=Math.max(pline.length,wline.length),centers=[];let x=0;
-  for(let c=0;c<len;c++){const isPuzzle=pline[c]&&pline[c]!=='_';const w=isPuzzle?GRID:TEXT_STEP;centers[c]=x+w/2;x+=w}
+  for(let c=0;c<len;c++){
+    const isPuzzle=pline[c]&&pline[c]!=='_';
+    const wc=wline[c]||'';
+    const w=isPuzzle?GRID:(wc===' '||wc==='.'||wc===',')?32:TEXT_STEP;
+    centers[c]=x+w/2;x+=w
+  }
   ROW_WIDTH[r]=x;
   return centers;
 });
@@ -104,10 +109,9 @@ function makePuzzle(ch,index,x,y){
   return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false,mask,scale};
 }
 
-const MAP_LINES=PUZZLE_MAP.split('\n'), MAP_ROWS=MAP_LINES.length, FRAME_MARGIN=GRID;
-const WORLD_MIN_X=-FRAME_MARGIN, WORLD_MAX_X=Math.max(...ROW_WIDTH)+FRAME_MARGIN;
-const WORLD_MIN_Y=-FRAME_MARGIN, WORLD_MAX_Y=(MAP_ROWS-1)*GRID+FRAME_MARGIN;
-function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
+const MAP_LINES=PUZZLE_MAP.split('\n'), MAP_ROWS=MAP_LINES.length;const PADDING_X = 64;const PADDING_Y = 64;
+const WORLD_MIN_X = -PADDING_X;const WORLD_MAX_X = Math.max(...ROW_WIDTH) + PADDING_X;
+const WORLD_MIN_Y = -(PADDING_Y + GRID/2);const WORLD_MAX_Y = (MAP_ROWS - 1) * GRID + (PADDING_Y + GRID/2);function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
 
 const puzzleEntries=parseGrid(PUZZLE_MAP), worldLetters=parseGrid(WORLD_MAP);
 puzzleEntries.forEach((e, i) => e.globalIndex = i);
