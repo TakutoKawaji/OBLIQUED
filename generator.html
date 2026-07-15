@@ -58,17 +58,6 @@ function edgeOK(active,diag,rows,cols,hints,final){const d=new DSU((rows+1)*(col
 function solveUnique(active,rows,cols,clues,hints){let count=0,nodes=0,budget=false;const cells=[];for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c])cells.push(r+','+c);function go(diag){if(count>1||budget)return;if(++nodes>1500){budget=true;return}const cur={...diag};let changed=true;while(changed){changed=false;for(const [vk,target] of Object.entries(clues)){const [vr,vc]=vk.split(',').map(Number),opts=vertexOptions(active,rows,cols,vr,vc),touch=opts.filter(o=>cur[o.key]===o.state).length,free=opts.filter(o=>cur[o.key]===undefined);if(touch>target||touch+free.length<target)return;if(touch===target)for(const o of free){cur[o.key]=o.state==='black'?'dot':'black';changed=true}else if(touch+free.length===target)for(const o of free){cur[o.key]=o.state;changed=true}}}if(!edgeOK(active,cur,rows,cols,hints,false))return;const next=cells.find(k=>cur[k]===undefined);if(!next){if(edgeOK(active,cur,rows,cols,hints,true))count++;return}for(const state of ['black','dot'])go({...cur,[next]:state})}go({});return {count,budget}}
 function generatePuzzleLoops(active,rows,cols,index){let seed=12345+index*7919;const rnd=()=>((seed=(seed*1664525+1013904223)>>>0)/4294967296);const cells=[];for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c])cells.push(r+','+c);for(let attempt=0;attempt<24;attempt++){const answer={};cells.forEach(k=>answer[k]=rnd()<.5?'black':'dot');const {full,letters}=computeCluesExcludingLetters(active,answer,rows,cols),base=solveUnique(active,rows,cols,full,letters);if(base.count!==1||base.budget)continue;let clues={...full},hints=letters.slice();const order=Object.keys(full).sort(()=>rnd()-.5);order.forEach(k=>{const trial={...clues};delete trial[k];const r=solveUnique(active,rows,cols,trial,hints);if(r.count===1&&!r.budget)clues=trial});const labels=[...new Set(hints.map(h=>h.label))].sort(()=>rnd()-.5);labels.forEach(label=>{const trial=hints.filter(h=>h.label!==label),r=solveUnique(active,rows,cols,clues,trial);if(r.count===1&&!r.budget)hints=trial});return {answer,clues,letterHints:hints}}return null}
 
-function computeActiveGrid(ch){
-  const rows=16,cols=16,scale=40,mask=document.createElement('canvas'),m=mask.getContext('2d');
-  mask.width=cols*scale;mask.height=rows*scale;m.fillStyle='#000';m.fillRect(0,0,mask.width,mask.height);m.fillStyle='#fff';m.textAlign='center';m.textBaseline='middle';let fontSize=mask.height*.99;m.font=`bold ${fontSize}px Arial`;while(m.measureText(ch).width>mask.width*.97){fontSize-=1;m.font=`bold ${fontSize}px Arial`};m.fillText(ch,mask.width/2,mask.height/2+fontSize*.02);
-  const pixels=m.getImageData(0,0,mask.width,mask.height).data,active=[];
-  for(let r=0;r<rows;r++){active[r]=[];for(let c=0;c<cols;c++){
-    let white=0;for(let yy=0;yy<scale;yy++)for(let xx=0;xx<scale;xx++)white+=pixels[((r*scale+yy)*mask.width+c*scale+xx)*4];
-    active[r][c]=white/(scale*scale)>96;
-  }}
-  return {rows,cols,active};
-}
-
 const puzzleEntries=parseGrid(PUZZLE_MAP);
 puzzleEntries.forEach((e,i)=>e.globalIndex=i);
 
@@ -108,7 +97,34 @@ loadFileEl.addEventListener('change',()=>{
   reader.readAsText(file);
 });
 
-function shapeKeysOf(active,rows,cols){const keys=[];for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c])keys.push(r+','+c);return keys}
+function shapeAndBorderKeysOf(active,isBorder,rows,cols){
+  const shape=[], border=[];
+  for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){
+    shape.push(r+','+c);
+    if(isBorder[r][c]) border.push(r+','+c);
+  }
+  return {shape, border};
+}
+
+function computeActiveGrid(ch){
+  const rows=16,cols=16,scale=40,mask=document.createElement('canvas'),m=mask.getContext('2d');
+  mask.width=cols*scale;mask.height=rows*scale;m.fillStyle='#000';m.fillRect(0,0,mask.width,mask.height);m.fillStyle='#fff';m.textAlign='center';m.textBaseline='middle';let fontSize=mask.height*.99;m.font=`bold ${fontSize}px Arial`;while(m.measureText(ch).width>mask.width*.97){fontSize-=1;m.font=`bold ${fontSize}px Arial`};m.fillText(ch,mask.width/2,mask.height/2+fontSize*.02);
+  const pixels=m.getImageData(0,0,mask.width,mask.height).data,active=[],isBorder=[];
+  
+  for(let r=0;r<rows;r++){active[r]=[];isBorder[r]=[];for(let c=0;c<cols;c++){
+    let white=0;for(let yy=0;yy<scale;yy++)for(let xx=0;xx<scale;xx++)white+=pixels[((r*scale+yy)*mask.width+c*scale+xx)*4];
+    active[r][c]=white/(scale*scale)>96;
+
+    // ゲーム側にあった isBorder の計算ロジックをこちらに移植
+    let min=255;
+    for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){
+      let px=~~(c*scale + scale*xx), py=~~(r*scale + scale*yy);
+      min=Math.min(min, pixels[(py*mask.width+px)*4]);
+    }
+    isBorder[r][c] = min <= 210;
+  }}
+  return {rows,cols,active,isBorder};
+}
 
 function generateAll(){
   const data={...(existingData||{})},total=puzzleEntries.length;
@@ -116,11 +132,12 @@ function generateAll(){
   if(skipCount>0) log(`${skipCount}/${total} puzzles already present — skipping those, generating the rest...`);
   else log(`generating ${total} puzzles...`);
   puzzleEntries.forEach((e,i)=>{
-    const {rows,cols,active}=computeActiveGrid(e.ch);
+    const {rows,cols,active,isBorder}=computeActiveGrid(e.ch);
+    const {shape, border}=shapeAndBorderKeysOf(active,isBorder,rows,cols);
     if(data[e.globalIndex]!==undefined){
-      if(!data[e.globalIndex].shape){
-        data[e.globalIndex]={...data[e.globalIndex],shape:shapeKeysOf(active,rows,cols)};
-        log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) already exists — backfilled shape data`,'ok');
+      if(!data[e.globalIndex].shape || !data[e.globalIndex].border){
+        data[e.globalIndex]={...data[e.globalIndex],shape,border};
+        log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) already exists — backfilled shape/border data`,'ok');
       }else{
         log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) already exists — skipped`);
       }
@@ -129,7 +146,7 @@ function generateAll(){
     const t0=performance.now();
     const g=generatePuzzleLoops(active,rows,cols,e.globalIndex);
     const ms=(performance.now()-t0).toFixed(0);
-    if(g){data[e.globalIndex]={answer:g.answer,clues:g.clues,letterHints:g.letterHints,shape:shapeKeysOf(active,rows,cols)};log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) ${ms}ms`,'ok')}
+    if(g){data[e.globalIndex]={answer:g.answer,clues:g.clues,letterHints:g.letterHints,shape,border};log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) ${ms}ms`,'ok')}
     else log(`[${i+1}/${total}] ${e.ch} (index ${e.globalIndex}) ${ms}ms — FAILED, no unique solution found`,'fail');
   });
   return data;
