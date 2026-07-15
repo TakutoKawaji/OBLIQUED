@@ -15,15 +15,11 @@
 const view=document.querySelector('#view'), ui=document.querySelector('#ui'), v=view.getContext('2d'), u=ui.getContext('2d');
 const source=document.createElement('canvas'), s=source.getContext('2d',{willReadFrequently:true});
 const moire=document.createElement('canvas'), mo=moire.getContext('2d');
-// MOIRE_BLOCK: size (in CSS px) of one moire-sample block. Fixed regardless of zoom, so the
-// effect is strong when many tile periods fit inside a block (zoomed-out / dense view, like the
-// X thumbnail) and fades out once a tile period exceeds the block (zoomed-in / clean lines).
-// Lower = finer/subtler moire, higher = coarser/stronger swirl. Tune to taste.
-const MOIRE_BLOCK=1.15
-const ZOOMS=[0.5,1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
-function currentZooms(){return allClear?ZOOMS:ZOOMS.filter(z=>z!==0.5)}
-let dpr=1, fxDpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
-let jx=0, jy=0;
+const MOIRE_BLOCK=1.15, ZOOMS=[0.5,1,2,4,8,16], BASE_TILE=8, CELL=8, GRID=128;
+let dpr=1, zoom=2, cam={x:0,y:0}, drag=null, allClear=false, fxEnabled=true, cameraInitialized=false;
+let activeZooms=ZOOMS.filter(z=>z!==0.5), jx=0, jy=0;
+let stateVersion=0, lastSourceSig=null, cachedImageData=null;
+
 const PUZZLE_MAP=
 `____,_W__K_F__Z____
 S___Y________R____N_
@@ -36,19 +32,8 @@ _TRA_ A BIT, _ETUR_,
 YET SOMEHOW _RRIVIN_.
 _E_T _UR_ES, _U_BLES,
 _ER_APS IT ________.`;
-// TEXT_STEP is the horizontal advance for plain-text columns (tighter than GRID).
-// Measured against the widest glyph ink actually used in WORLD_MAP ('W' ~= 103 world units
-// at GRID=128), with a safety margin, so no two adjacent text glyphs can touch. Puzzle
-// columns always keep the full GRID width since a puzzle's own 16x16 grid can't shrink
-// without distorting its diagonal tile art, so this also guarantees puzzles never overlap.
-// MUST be a multiple of CELL (8): postEffect() samples a diagonal-tile grid anchored to
-// world (0,0), independent of each puzzle's own cell grid. If a puzzle's x-offset (which
-// accumulates TEXT_STEP/GRID widths from column 0) isn't a multiple of CELL, its cells fall
-// out of phase with the global tile grid and the rendered diagonals visibly drift from the
-// puzzle's actual (clickable) cell boundaries.
-const TEXT_STEP=96;
-const PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n');
-const ROW_WIDTH=[];
+
+const TEXT_STEP=96, PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n'), ROW_WIDTH=[];
 const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
   const wline=WORLD_LINES[r]||'', len=Math.max(pline.length,wline.length),centers=[];let x=0;
   for(let c=0;c<len;c++){const isPuzzle=pline[c]&&pline[c]!=='_';const w=isPuzzle?GRID:TEXT_STEP;centers[c]=x+w/2;x+=w}
@@ -57,12 +42,13 @@ const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
 });
 function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:ROW_CENTER_X[r][c],y:r*GRID})}});return out}
 
-class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){while(this.p[x]!==x){this.p[x]=this.p[this.p[x]];x=this.p[x]}return x}union(a,b){a=this.find(a);b=this.find(b);if(a!==b)this.p[a]=b}}
+class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){return this.p[x]===x?x:this.p[x]=this.find(this.p[x])}union(a,b){this.p[this.find(a)]=this.find(b)}}
+
 function vertexClues(active,diag,rows,cols){const out={};for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const d=diag[r+','+c],v=d==='black'?[[r,c],[r+1,c+1]]:[[r,c+1],[r+1,c]];v.forEach(([y,x])=>out[y+','+x]=(out[y+','+x]||0)+1)}return out}
 function letterName(i){return String.fromCharCode(65+i)}
 function alphabetHints(active,diag,rows,cols){const dsu=new DSU((rows+1)*(cols+1)),edges=[];const id=(r,c)=>r*(cols+1)+c;for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const slash=diag[r+','+c]==='dot';dsu.union(slash?id(r,c+1):id(r,c),slash?id(r+1,c):id(r+1,c+1));if(r===0||!active[r-1][c])edges.push({r,c,side:'top',v:slash?id(r,c+1):id(r,c)});if(r===rows-1||!active[r+1][c])edges.push({r,c,side:'bottom',v:slash?id(r+1,c):id(r+1,c+1)});if(c===0||!active[r][c-1])edges.push({r,c,side:'left',v:slash?id(r+1,c):id(r,c)});if(c===cols-1||!active[r][c+1])edges.push({r,c,side:'right',v:slash?id(r+1,c+1):id(r,c+1)})}
   const groups={};edges.forEach(e=>(groups[dsu.find(e.v)]??=[]).push(e));let n=0,out=[];Object.values(groups).forEach(g=>{if(g.length>1){const label=letterName(n++);g.forEach(e=>out.push({...e,label}))}});return out}
-function vidToKey(v,cols){const r=Math.floor(v/(cols+1)),c=v%(cols+1);return r+','+c}
+function vidToKey(v,cols){return ~~(v/(cols+1))+','+(v%(cols+1))}
 function computeCluesExcludingLetters(active,answer,rows,cols){
   const letters=alphabetHints(active,answer,rows,cols);
   const letterKeys=new Set(letters.map(h=>vidToKey(h.v,cols)));
@@ -83,7 +69,7 @@ function computeActiveGrid(ch){
     active[r][c]=white/(scale*scale)>96;
     let min=255;
     for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){
-      let px=Math.floor(c*scale + scale*xx), py=Math.floor(r*scale + scale*yy);
+      let px=~~(c*scale + scale*xx), py=~~(r*scale + scale*yy);
       min=Math.min(min, pixels[(py*mask.width+px)*4]);
     }
     isBorder[r][c] = min <= 210;
@@ -91,10 +77,6 @@ function computeActiveGrid(ch){
   return {rows,cols,scale,mask,active,isBorder};
 }
 function applyBakedShape(rows,cols,isBorder,shapeKeys){
-  // Rebuilds the active grid from baked data instead of trusting the local font
-  // render, so the puzzle's cell layout is identical on every machine. isBorder
-  // is cosmetic (only affects each cell's starting state), so it's fine to keep
-  // it locally rendered — we just clamp it to the baked-active cells.
   const keep=new Set(shapeKeys),active=[],border=[];
   for(let r=0;r<rows;r++){active[r]=[];border[r]=[];for(let c=0;c<cols;c++){
     const on=keep.has(r+','+c);
@@ -122,10 +104,7 @@ function makePuzzle(ch,index,x,y){
   return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false,mask,scale};
 }
 
-
-const MAP_LINES=PUZZLE_MAP.split('\n');
-const MAP_ROWS=MAP_LINES.length;
-const FRAME_MARGIN=GRID;
+const MAP_LINES=PUZZLE_MAP.split('\n'), MAP_ROWS=MAP_LINES.length, FRAME_MARGIN=GRID;
 const WORLD_MIN_X=-FRAME_MARGIN, WORLD_MAX_X=Math.max(...ROW_WIDTH)+FRAME_MARGIN;
 const WORLD_MIN_Y=-FRAME_MARGIN, WORLD_MAX_Y=(MAP_ROWS-1)*GRID+FRAME_MARGIN;
 function clampCamera(){cam.x=Math.max(WORLD_MIN_X,Math.min(WORLD_MAX_X,cam.x));cam.y=Math.max(WORLD_MIN_Y,Math.min(WORLD_MAX_Y,cam.y))}
@@ -148,20 +127,15 @@ allEntries.forEach(({e,kind})=>{
 if(curPuzzles.length||curLetters.length)stages.push({puzzles:curPuzzles,letters:curLetters});
 stages.forEach((stage,i)=>stage.puzzles.forEach(p=>p.stageIndex=i));
 
-const puzzles = [];
-const activeWorldLetters = [];
+const puzzles = [], activeWorldLetters = [];
 let currentStageIndex = 0;
 
 function revealTiles(newPuzzles, newLetters, onDone) {
   const queue = [];
-  newPuzzles.forEach(p => {
-    Object.keys(p.initialPlayer).forEach(key => queue.push({ type: 'cell', p, key }));
-  });
-  newLetters.forEach(e => {
-    e.cells.forEach(key => queue.push({ type: 'worldcell', e, key }));
-  });
+  newPuzzles.forEach(p => Object.keys(p.initialPlayer).forEach(key => queue.push({ type: 'cell', p, key })));
+  newLetters.forEach(e => e.cells.forEach(key => queue.push({ type: 'worldcell', e, key })));
   for (let i = queue.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = ~~(Math.random() * (i + 1));
     [queue[i], queue[j]] = [queue[j], queue[i]];
   }
   if (queue.length === 0) {
@@ -169,19 +143,13 @@ function revealTiles(newPuzzles, newLetters, onDone) {
     onDone && onDone();
     return;
   }
-  
-  // アニメーション全体を4秒（4000ms）かけて完了させる
   const durationMs = 4000; 
-  let startTime = null;
-  let idx = 0;
-
+  let startTime = null, idx = 0;
   function step(timestamp) {
     if (!startTime) startTime = timestamp;
     const elapsed = timestamp - startTime;
-
     const progress = Math.min(1, Math.max(0, elapsed / durationMs));
-    const targetIdx = Math.floor(progress * queue.length);
-
+    const targetIdx = ~~(progress * queue.length);
     while (idx < targetIdx) {
       const item = queue[idx];
       if (item.type === 'cell') {
@@ -191,18 +159,15 @@ function revealTiles(newPuzzles, newLetters, onDone) {
         item.e.revealedCells.add(item.key);
       }
       idx++;
+      stateVersion++;
     }
-
     render();
-
-    if (idx < queue.length) {
-      requestAnimationFrame(step);
-    } else {
+    if (idx < queue.length) requestAnimationFrame(step);
+    else {
       newPuzzles.forEach(p => p.revealed = true);
       onDone && onDone();
     }
   }
-  
   requestAnimationFrame(step);
 }
 
@@ -213,9 +178,11 @@ function spawnStage(index) {
   activeWorldLetters.push(...stage.letters);
   const newPuzzles = stage.puzzles.map(p => makePuzzle(p.ch, p.globalIndex, p.x, p.y));
   puzzles.push(...newPuzzles);
+  stateVersion++;
   render();
   revealTiles(newPuzzles, stage.letters, () => {
     allClear = (index === stages.length - 1) && puzzles.every(x => x.cleared);
+    if (allClear) activeZooms = ZOOMS;
     render();
   });
 }
@@ -236,14 +203,12 @@ function getGlyph(ch){
 const glyphCellsCache=new Map();
 function getGlyphCells(ch){
   if(glyphCellsCache.has(ch))return glyphCellsCache.get(ch);
-  const glyph=getGlyph(ch),gctx=glyph.getContext('2d');
-  const cellPx=glyph.width/WORLD_TILES;
-  const data=gctx.getImageData(0,0,glyph.width,glyph.height).data;
-  const cells=[];
+  const glyph=getGlyph(ch),gctx=glyph.getContext('2d'),cellPx=glyph.width/WORLD_TILES;
+  const data=gctx.getImageData(0,0,glyph.width,glyph.height).data,cells=[];
   for(let r=0;r<WORLD_TILES;r++)for(let c=0;c<WORLD_TILES;c++){
     let hasInk=false;
     for(let yy=0;yy<cellPx&&!hasInk;yy+=2)for(let xx=0;xx<cellPx&&!hasInk;xx+=2){
-      const px=Math.floor(c*cellPx+xx),py=Math.floor(r*cellPx+yy);
+      const px=~~(c*cellPx+xx),py=~~(r*cellPx+yy);
       if(data[(py*glyph.width+px)*4]>40)hasInk=true;
     }
     if(hasInk)cells.push(r+','+c);
@@ -254,10 +219,11 @@ function worldToScreen(x,y){return {x:(x-cam.x)*zoom+innerWidth/2,y:(y-cam.y)*zo
 function screenToWorld(x,y){return {x:(x-innerWidth/2)/zoom+cam.x,y:(y-innerHeight/2)/zoom+cam.y}}
 function inViewport(x,y){const g=worldToScreen(x,y),half=GRID*zoom/2;return g.x+half>=0&&g.x-half<=innerWidth&&g.y+half>=0&&g.y-half<=innerHeight}
 function resize(){
-  dpr=Math.min(devicePixelRatio||1,2);fxDpr=1;
+  dpr=Math.min(devicePixelRatio||1,2);
   ui.width=Math.max(1,Math.round(innerWidth*dpr));ui.height=Math.max(1,Math.round(innerHeight*dpr));
-  [view,source].forEach(c=>{c.width=Math.max(1,Math.round(innerWidth*fxDpr));c.height=Math.max(1,Math.round(innerHeight*fxDpr))});
+  [view,source].forEach(c=>{c.width=Math.max(1,innerWidth);c.height=Math.max(1,innerHeight)});
   moire.width=Math.max(1,Math.round(view.width/MOIRE_BLOCK));moire.height=Math.max(1,Math.round(view.height/MOIRE_BLOCK));
+  mo.imageSmoothingEnabled=false;v.imageSmoothingEnabled=true;
   if(!cameraInitialized&&innerWidth>0&&innerHeight>0){cam.x=WORLD_MIN_X;cam.y=WORLD_MIN_Y;cameraInitialized=true}
   clampCamera();
   render();
@@ -269,7 +235,7 @@ function drawBoundaryFrame(){
 }
 function prepareSource(){
   if(innerWidth<=0||innerHeight<=0)return;
-  s.setTransform(fxDpr,0,0,fxDpr,0,0);s.fillStyle='#000';s.fillRect(0,0,innerWidth,innerHeight);
+  s.resetTransform();s.fillStyle='#000';s.fillRect(0,0,innerWidth,innerHeight);
   const cells=new Path2D();
   puzzles.forEach(p=>{if(inViewport(p.x,p.y))drawPuzzleSource(p,cells)});
   s.fillStyle='#fff';s.fill(cells,'evenodd');
@@ -287,22 +253,20 @@ function drawWorldLetterSource(e){
   });
 }
 function drawPuzzleSource(p,cells){
-  const g=worldToScreen(p.x,p.y), size=CELL*zoom;
-  const ox=g.x-p.cols*size/2, oy=g.y-p.rows*size/2;
+  const g=worldToScreen(p.x,p.y), size=CELL*zoom, ox=g.x-p.cols*size/2, oy=g.y-p.rows*size/2;
   for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c]){
     const state=p.player[r+','+c];
     if(state==='white'||state==='dot'){
       const x=ox+c*size,y=oy+r*size;
       cells.rect(x,y,size,size);
-      if(state==='dot'){const inset=size*.3;cells.rect(x+inset,y+inset,size-2*inset,size-2*inset)}
+      if(state==='dot'){const hx=size*.1,hy=size*.1,hs=size*.3;cells.rect(x+hx,y+hy,hs,hs)}
     }
   }
 }
 function addTileShape(path,x,y,size,kind){
-  const q=size/4;
-  const bands=kind==='black'
+  const q=size/4, bands=kind==='black'
     ? [[[0,q],[3*q,size],[q,size],[0,3*q]],[[q,0],[size,3*q],[size,q],[3*q,0]]]
-    : [[[q,0],[3*q,0],[size,q],[size,3*q],[3*q,size],[q,size],[0,3*q],[0,q]]]
+    : [[[q,0],[3*q,0],[size,q],[size,3*q],[3*q,size],[q,size],[0,3*q],[0,q]]];
   bands.forEach(points=>{points.forEach(([px,py],i)=>i?path.lineTo(x+px,y+py):path.moveTo(x+px,y+py));path.closePath()});
 }
 const tileBitmapCache={};
@@ -310,29 +274,37 @@ function getTileBitmaps(z){
   let e=tileBitmapCache[z];if(e)return e;
   const t=BASE_TILE*z;
   const mk=kind=>{const c=document.createElement('canvas');c.width=t;c.height=t;const g=c.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,t,t);const path=new Path2D();addTileShape(path,0,0,t,kind);g.fillStyle='#fff';g.fill(path);return c};
-  const white=mk('white'), black=mk('black');
-  const mixed=document.createElement('canvas');mixed.width=t;mixed.height=t;
+  const white=mk('white'), black=mk('black'), mixed=document.createElement('canvas');mixed.width=t;mixed.height=t;
   const mg=mixed.getContext('2d');mg.translate(t/2,t/2);mg.rotate(Math.PI/2);mg.drawImage(black,-t/2,-t/2);
   e={white,black,mixed};tileBitmapCache[z]=e;return e;
 }
+
+const TILE_SAMPLE_OFFSETS=[.25,.75];
 function postEffect(){
   if(source.width<=0||source.height<=0||innerWidth<=0||innerHeight<=0)return;
-  v.setTransform(fxDpr,0,0,fxDpr,0,0);
-  const t=BASE_TILE*zoom;
-  const phaseX=(((innerWidth/2-cam.x*zoom)%t)+t)%t, phaseY=(((innerHeight/2-cam.y*zoom)%t)+t)%t;
+  v.resetTransform();
+  const t=BASE_TILE*zoom, phaseX=(((innerWidth/2-cam.x*zoom)%t)+t)%t, phaseY=(((innerHeight/2-cam.y*zoom)%t)+t)%t;
   const tiles=getTileBitmaps(zoom);
   v.save();v.translate(phaseX-t,phaseY-t);v.fillStyle=v.createPattern(tiles.white,'repeat');v.fillRect(-(phaseX-t),-(phaseY-t),innerWidth,innerHeight);v.restore();
-  const data=s.getImageData(0,0,source.width,source.height).data;
+  if(!cachedImageData)cachedImageData=s.getImageData(0,0,source.width,source.height).data;
+  const data=cachedImageData, sw=source.width, sh=source.height;
   for(let y=phaseY-t;y<innerHeight;y+=t)for(let x=phaseX-t;x<innerWidth;x+=t){
-    let min=255,max=0;for(let yy=.15;yy<.9;yy+=.35)for(let xx=.15;xx<.9;xx+=.35){let px=Math.max(0,Math.min(source.width-1,Math.floor((x+t*xx+jx)*fxDpr))),py=Math.max(0,Math.min(source.height-1,Math.floor((y+t*yy+jy)*fxDpr))),bright=data[(py*source.width+px)*4];min=Math.min(min,bright);max=Math.max(max,bright)}
+    let min=255,max=0;
+    for(const yy of TILE_SAMPLE_OFFSETS)for(const xx of TILE_SAMPLE_OFFSETS){
+      let px=~~(x+t*xx+jx), py=~~(y+t*yy+jy);
+      if(px<0)px=0;else if(px>=sw)px=sw-1;
+      if(py<0)py=0;else if(py>=sh)py=sh-1;
+      let bright=data[(py*sw+px)*4];
+      if(bright<min)min=bright;
+      if(bright>max)max=bright;
+    }
     const kind=min===255?'white':max===0?'black':'mixed';
     if(kind!=='white')v.drawImage(tiles[kind],x,y);
   }
 }
 function clueMismatch(p,vk,target){
   const [vr,vc]=vk.split(',').map(Number),opts=vertexOptions(p.active,p.rows,p.cols,vr,vc);
-  const touch=opts.filter(o=>p.player[o.key]===o.state).length;
-  return touch !== target;
+  return opts.filter(o=>p.player[o.key]===o.state).length!==target;
 }
 function letterMismatchSet(p){
   const d=new DSU((p.rows+1)*(p.cols+1)),id=(r,c)=>r*(p.cols+1)+c;
@@ -341,32 +313,23 @@ function letterMismatchSet(p){
     const [r,c]=k.split(',').map(Number);
     d.union(state==='black'?id(r,c):id(r,c+1),state==='black'?id(r+1,c+1):id(r+1,c));
   });
-  const bad=new Set();
-  const labelNodes={};
-  p.letterHints.forEach(h => {
-    (labelNodes[h.label] ??= []).push(h.v);
-  });
+  const bad=new Set(), labelNodes={};
+  p.letterHints.forEach(h=>(labelNodes[h.label]??=[]).push(h.v));
   for(const [label, nodes] of Object.entries(labelNodes)){
-    let isCorrect = true;
-    const root = d.find(nodes[0]);
-    if(nodes.some(v => d.find(v) !== root)){
-      isCorrect = false;
-    }
-    if(isCorrect) {
+    let isCorrect=true;
+    const root=d.find(nodes[0]);
+    if(nodes.some(v=>d.find(v)!==root))isCorrect=false;
+    if(isCorrect){
       for(const otherLabel of Object.keys(labelNodes)){
-        if(label === otherLabel) continue;
-        if(labelNodes[otherLabel].some(v => d.find(v) === root)){
-          isCorrect = false;
-          break;
-        }
+        if(label===otherLabel)continue;
+        if(labelNodes[otherLabel].some(v=>d.find(v)===root)){isCorrect=false;break}
       }
     }
-    if(!isCorrect){
-      nodes.forEach(v => bad.add(v));
-    }
+    if(!isCorrect)nodes.forEach(v=>bad.add(v));
   }
   return bad;
-}function refreshMismatchCache(p){
+}
+function refreshMismatchCache(p){
   if(!p.dirty)return;
   const bad={};Object.entries(p.clues).forEach(([key,n])=>bad[key]=clueMismatch(p,key,n));
   p._clueBad=bad;p._letterBad=letterMismatchSet(p);p.dirty=false;
@@ -377,13 +340,15 @@ function telopText(){
   if(zoom===4)return'CLICK TO SWITCH';
   return null;
 }
+
+let lastTelopText=null, cachedTelopLines=[];
 function drawTelop(){
   const text=telopText();if(!text)return;
-  const lines=text.split(' ');
+  if(text!==lastTelopText){lastTelopText=text;cachedTelopLines=text.split(' ')}
   const fontSize=Math.min(innerWidth,innerHeight)*.06,lineHeight=fontSize*1.15;
   u.fillStyle='#fff';u.font=`bold ${fontSize}px Arial`;u.textAlign='center';u.textBaseline='middle';
-  const cy=innerHeight/2,startY=cy-(lines.length-1)*lineHeight/2;
-  lines.forEach((line,i)=>u.fillText(line,innerWidth/2,startY+i*lineHeight));
+  const cy=innerHeight/2,startY=cy-(cachedTelopLines.length-1)*lineHeight/2;
+  cachedTelopLines.forEach((line,i)=>u.fillText(line,innerWidth/2,startY+i*lineHeight));
 }
 function drawUI(){
   u.setTransform(dpr,0,0,dpr,0,0);u.clearRect(0,0,innerWidth,innerHeight);drawTelop();if(zoom<8)return;
@@ -396,62 +361,45 @@ function drawUI(){
     Object.entries(p.clues).forEach(([key,n])=>{let [r,c]=key.split(',').map(Number);u.fillStyle=p._clueBad[key]?'#f33':'#fff';u.fillText(n,ox+c*z,oy+r*z)});
     u.fillStyle='#fff';u.font='bold 40px Arial';
     const seen=new Set();
-    p.letterHints.forEach(h=>{if(seen.has(h.v))return;seen.add(h.v);const vr=Math.floor(h.v/(p.cols+1)),vc=h.v%(p.cols+1);u.fillStyle=p._letterBad.has(h.v)?'#f33':'#fff';u.fillText(h.label,ox+vc*z,oy+vr*z)});
+    p.letterHints.forEach(h=>{if(seen.has(h.v))return;seen.add(h.v);const vr=~~(h.v/(p.cols+1)),vc=h.v%(p.cols+1);u.fillStyle=p._letterBad.has(h.v)?'#f33':'#fff';u.fillText(h.label,ox+vc*z,oy+vr*z)});
   });
   if(allClear){u.fillStyle='#fff';u.font=`bold ${Math.min(innerWidth,innerHeight)*.17}px Arial`;u.textAlign='center';u.fillText('THX.',innerWidth/2,innerHeight/2)}
 }
 function applyMoire(){
   if(moire.width<=0||moire.height<=0)return;
-  // Step 1: decimate the sharp render down to a tiny buffer with smoothing OFF (point sampling).
-  // With no low-pass filter, any tile period smaller than a block aliases into new low-frequency
-  // beat patterns -- this is exactly what happened when the video got downscaled for the thumbnail.
-  mo.imageSmoothingEnabled=false;
-  mo.clearRect(0,0,moire.width,moire.height);
   mo.drawImage(view,0,0,view.width,view.height,0,0,moire.width,moire.height);
-  // Step 2: blow the tiny aliased buffer back up to full size with smoothing ON, matching how a
-  // video player interpolates a low-res thumbnail into that soft "gradient" look.
-  v.setTransform(fxDpr,0,0,fxDpr,0,0);
-  v.imageSmoothingEnabled=true;
-  v.clearRect(0,0,innerWidth,innerHeight);
+  v.resetTransform();
   v.drawImage(moire,0,0,moire.width,moire.height,0,0,innerWidth,innerHeight);
 }
-function render(){prepareSource();if(fxEnabled)postEffect();else{v.setTransform(fxDpr,0,0,fxDpr,0,0);v.drawImage(source,0,0,source.width,source.height,0,0,innerWidth,innerHeight)}if(fxEnabled)applyMoire();drawUI()}
+function render(){
+  const sig=cam.x+'|'+cam.y+'|'+zoom+'|'+view.width+'|'+view.height+'|'+stateVersion;
+  if(sig!==lastSourceSig){prepareSource();lastSourceSig=sig;cachedImageData=null}
+  if(fxEnabled)postEffect();else{v.resetTransform();v.drawImage(source,0,0,source.width,source.height,0,0,innerWidth,innerHeight)}
+  if(fxEnabled)applyMoire();drawUI()
+}
 let renderScheduled=false;
 function scheduleRender(){
   if(renderScheduled)return;renderScheduled=true;
   requestAnimationFrame(()=>{renderScheduled=false;render()});
 }
 let shimmerFrame=0;
+const SHIMMER_EVERY=2;
 function shimmerLoop(){
   shimmerFrame++;
-  if(fxEnabled){
-    jx=(Math.random()-.5)*1.2;
-    jy=(Math.random()-.5)*1.2;
-    scheduleRender();
-  }
+  if(fxEnabled&&shimmerFrame%SHIMMER_EVERY===0){jx=(Math.random()-.5)*1.2;jy=(Math.random()-.5)*1.2;scheduleRender()}
   requestAnimationFrame(shimmerLoop);
 }
 requestAnimationFrame(shimmerLoop);
 function clickPuzzle(e){if(zoom<8||allClear)return;let q=screenToWorld(e.clientX,e.clientY);
   for(const p of puzzles){if(p.cleared||!p.revealed)continue;let left=p.x-p.cols*CELL/2,top=p.y-p.rows*CELL/2,c=Math.floor((q.x-left)/CELL),r=Math.floor((q.y-top)/CELL);if(r<0||c<0||r>=p.rows||c>=p.cols||!p.active[r]?.[c])continue;
     const k=r+','+c;
-    if(p.isBorder[r][c]){
-      p.player[k]=p.player[k]==='dot'?'white':p.player[k]==='white'?'black':'dot';
-    }else{
-      p.player[k]=p.player[k]==='white'?'black':p.player[k]==='black'?'dot':'white';
-    }
+    if(p.isBorder[r][c])p.player[k]=p.player[k]==='dot'?'white':p.player[k]==='white'?'black':'dot';
+    else p.player[k]=p.player[k]==='white'?'black':p.player[k]==='black'?'dot':'white';
     p.cleared=Object.values(p.player).every(x=>x!=='white')&&playerMatchesClues(p)&&playerMatchesAlphabet(p);
-    p.dirty=true;
-    render();
-    
-    if (puzzles.every(x => x.cleared)) {
-      if (currentStageIndex < stages.length - 1) {
-        currentStageIndex++;
-        setTimeout(() => spawnStage(currentStageIndex), 400);
-      } else {
-        allClear = true;
-        render();
-      }
+    p.dirty=true;stateVersion++;render();
+    if (puzzles.every(x=>x.cleared)) {
+      if(currentStageIndex<stages.length-1){currentStageIndex++;setTimeout(()=>spawnStage(currentStageIndex),400)}
+      else{allClear=true;activeZooms=ZOOMS;render()}
     }
     break;
   }}
@@ -459,12 +407,8 @@ function clickPuzzle(e){if(zoom<8||allClear)return;let q=screenToWorld(e.clientX
 const pointers=new Map();let pinchDist=0;
 ui.addEventListener('pointerdown',e=>{
   pointers.set(e.pointerId,e);ui.setPointerCapture(e.pointerId);
-  if(pointers.size===1){drag={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y,moved:false};}
-  else if(pointers.size===2){
-    let p=Array.from(pointers.values());
-    pinchDist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
-    if(drag)drag.moved=true;
-  }
+  if(pointers.size===1)drag={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y,moved:false};
+  else if(pointers.size===2){let p=Array.from(pointers.values());pinchDist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);if(drag)drag.moved=true}
 });
 ui.addEventListener('pointermove',e=>{
   if(!pointers.has(e.pointerId))return;
@@ -473,9 +417,9 @@ ui.addEventListener('pointermove',e=>{
     let p=Array.from(pointers.values()), dist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
     let cx=(p[0].clientX+p[1].clientX)/2, cy=(p[0].clientY+p[1].clientY)/2, ratio=dist/pinchDist;
     if(ratio>1.4 || ratio<0.7){
-      let zooms=currentZooms(), before=screenToWorld(cx,cy), i=zooms.indexOf(zoom);
-      zoom=zooms[Math.max(0,Math.min(zooms.length-1,i+(ratio>1?1:-1)))];
-      fxEnabled = (zoom !== 0.5);
+      let before=screenToWorld(cx,cy), i=activeZooms.indexOf(zoom);
+      zoom=activeZooms[Math.max(0,Math.min(activeZooms.length-1,i+(ratio>1?1:-1)))];
+      fxEnabled=(zoom!==0.5);
       let after=screenToWorld(cx,cy);
       cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender();
       pinchDist=dist;
@@ -488,21 +432,14 @@ ui.addEventListener('pointermove',e=>{
 });
 const pointerUp=e=>{
   pointers.delete(e.pointerId);
-  if(pointers.size===0){
-    if(drag&&!drag.moved)clickPuzzle(e);
-    drag=null;
-  }else if(pointers.size===1){
-    let p=Array.from(pointers.values())[0];
-    drag={x:p.clientX,y:p.clientY,cx:cam.x,cy:cam.y,moved:true};
-  }
+  if(pointers.size===0){if(drag&&!drag.moved)clickPuzzle(e);drag=null}
+  else if(pointers.size===1){let p=Array.from(pointers.values())[0];drag={x:p.clientX,y:p.clientY,cx:cam.x,cy:cam.y,moved:true}}
 };
-ui.addEventListener('pointerup',pointerUp);
-ui.addEventListener('pointercancel',pointerUp);
-ui.addEventListener('wheel',e=>{e.preventDefault();let zooms=currentZooms(),before=screenToWorld(e.clientX,e.clientY),i=zooms.indexOf(zoom);zoom=zooms[Math.max(0,Math.min(zooms.length-1,i+(e.deltaY<0?1:-1)))];fxEnabled=(zoom!==0.5);let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
+['pointerup','pointercancel'].forEach(ev=>ui.addEventListener(ev,pointerUp));
+ui.addEventListener('wheel',e=>{e.preventDefault();let before=screenToWorld(e.clientX,e.clientY),i=activeZooms.indexOf(zoom);zoom=activeZooms[Math.max(0,Math.min(activeZooms.length-1,i+(e.deltaY<0?1:-1)))];fxEnabled=(zoom!==0.5);let after=screenToWorld(e.clientX,e.clientY);cam.x+=before.x-after.x;cam.y+=before.y-after.y;clampCamera();scheduleRender()},{passive:false});
 addEventListener('resize',resize);resize();
 
 requestAnimationFrame(()=>{requestAnimationFrame(()=>{spawnStage(0)})});
-
 })();
 </script>
 </html>
