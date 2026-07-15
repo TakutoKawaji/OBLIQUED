@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="ja">
 <meta charset="utf-8">
-<title>OBLIQUE — puzzle generator</title>
+<title>OBLIQUED puzzle generator</title>
 <style>
   html,body{margin:0;background:#111;color:#eee;font-family:Consolas,Menlo,monospace;height:100%}
   #wrap{max-width:760px;margin:0 auto;padding:24px}
@@ -16,11 +16,9 @@
 <div id="wrap">
   <h1>OBLIQUE — PUZZLE GENERATOR</h1>
   <p>
-    ゲーム本体（index.html）とは別に、パズルの解を一意に絞り込む処理をここで行います。<br>
+    パズルの解を一意に絞り込む処理を行います。<br>
     「Generate」を押すと PUZZLE_MAP 上の全パズルを生成し、<code>puzzle-data.js</code> としてダウンロードします。<br>
     出力したファイルを index.html と同じフォルダに置くと、ゲーム側は解の探索を一切行わずキャッシュを読むだけになります。
-  </p>
-  <p>
     既存の <code>puzzle-data.js</code> を読み込むと、そこに含まれるパズルはスキップし、未生成のものだけを作成して上書き保存します。<br>
     読み込まない場合は全パズルを新規生成します。
   </p>
@@ -33,14 +31,14 @@
 </div>
 <script>
 'use strict';
-const GRID=128;
 const PUZZLE_MAP=
 `____,_W__K_F__Z____
 S___Y________R____N_
 ____________A______G_
 T_X__C__V____J_M_____
 P__H_______OBLIQUED_`;
-function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:c*GRID,y:r*GRID})}});return out}
+
+function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch})}});return out}
 
 class DSU{constructor(n){this.p=Array.from({length:n},(_,i)=>i)}find(x){while(this.p[x]!==x){this.p[x]=this.p[this.p[x]];x=this.p[x]}return x}union(a,b){a=this.find(a);b=this.find(b);if(a!==b)this.p[a]=b}}
 function vertexClues(active,diag,rows,cols){const out={};for(let r=0;r<rows;r++)for(let c=0;c<cols;c++)if(active[r][c]){const d=diag[r+','+c],v=d==='black'?[[r,c],[r+1,c+1]]:[[r,c+1],[r+1,c]];v.forEach(([y,x])=>out[y+','+x]=(out[y+','+x]||0)+1)}return out}
@@ -78,10 +76,9 @@ const logEl=document.getElementById('log'), btn=document.getElementById('go');
 const loadFileEl=document.getElementById('loadFile'), loadStatusEl=document.getElementById('loadStatus');
 function log(line,cls){const d=document.createElement('div');if(cls)d.className=cls;d.textContent=line;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight}
 
-let existingData=null; // parsed {index: {...}} from a loaded puzzle-data.js, or null if none loaded
+let existingData=null; 
 
 function parsePuzzleDataText(text){
-  // puzzle-data.js is `window.PUZZLE_CACHE = {...};` — extract the object literal safely.
   const m=text.match(/PUZZLE_CACHE\s*=\s*(\{[\s\S]*\})\s*;?\s*$/);
   if(!m) throw new Error('PUZZLE_CACHE assignment not found in file');
   return JSON.parse(m[1]);
@@ -119,8 +116,6 @@ function generateAll(){
   if(skipCount>0) log(`${skipCount}/${total} puzzles already present — skipping those, generating the rest...`);
   else log(`generating ${total} puzzles...`);
   puzzleEntries.forEach((e,i)=>{
-    // Always compute the active grid, even for entries we'll skip, so we can backfill
-    // "shape" onto older cache entries that predate baked-shape support.
     const {rows,cols,active}=computeActiveGrid(e.ch);
     if(data[e.globalIndex]!==undefined){
       if(!data[e.globalIndex].shape){
@@ -151,7 +146,6 @@ function downloadPuzzleData(data){
 
 btn.addEventListener('click',()=>{
   btn.disabled=true;logEl.textContent='';
-  // let the "generating..." UI paint before the blocking work starts
   requestAnimationFrame(()=>requestAnimationFrame(()=>{
     const data=generateAll();
     downloadPuzzleData(data);
@@ -160,7 +154,6 @@ btn.addEventListener('click',()=>{
   }));
 });
 
-// also available from the console
 window.OBLIQUE_exportPuzzleData=()=>{const data=generateAll();downloadPuzzleData(data);return data};
 </script>
 </html>
