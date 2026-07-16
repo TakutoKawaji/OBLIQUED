@@ -36,6 +36,7 @@ _ER_APS IT ________.`;
 const TEXT_STEP=96, PUZZLE_LINES=PUZZLE_MAP.split('\n'), WORLD_LINES=WORLD_MAP.split('\n');
 let maxRowWidth = 0; 
 
+// [ソース1の最適化] 最大幅を更新しながら座標計算
 const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
   const wline=WORLD_LINES[r]||'', len=Math.max(pline.length,wline.length),centers=[];let x=0;
   for(let c=0;c<len;c++){
@@ -44,7 +45,7 @@ const ROW_CENTER_X=PUZZLE_LINES.map((pline,r)=>{
     const w=isPuzzle?GRID:(wc===' '||wc==='.'||wc===',')?32:TEXT_STEP;
     centers[c]=x+w/2;x+=w
   }
-  if (x > maxRowWidth) maxRowWidth = x; // 最大幅を更新
+  if (x > maxRowWidth) maxRowWidth = x; 
   return centers;
 });
 function parseGrid(str){const lines=str.split('\n'),out=[];lines.forEach((line,r)=>{for(let c=0;c<line.length;c++){const ch=line[c];if(ch&&ch!=='_')out.push({r,c,ch,x:ROW_CENTER_X[r][c],y:r*GRID})}});return out}
@@ -67,7 +68,7 @@ function playerMatchesClues(p){const c=vertexClues(p.active,p.player,p.rows,p.co
 function playerMatchesAlphabet(p){const got=alphabetHints(p.active,p.player,p.rows,p.cols),a={};got.forEach(e=>(a[e.label]??=[]).push(e.v));const want={};p.letterHints.forEach(e=>(want[e.label]??=[]).push(e.v));return Object.keys(want).every(k=>a[k]&&a[k].length===want[k].length&&a[k].every(v=>want[k].includes(v)))}
 function vertexOptions(active,rows,cols,vr,vc){const q=[];[[vr-1,vc-1,'black'],[vr-1,vc,'dot'],[vr,vc-1,'dot'],[vr,vc,'black']].forEach(([r,c,state])=>{if(r>=0&&c>=0&&r<rows&&c<cols&&active[r][c])q.push({key:r+','+c,state})});return q}
 
-// 最適化: 1pxずつ測るのではなく二分探索で最大フォントサイズを求める(measureText呼び出しを大幅削減)
+// [ソース1の最適化] 二分探索による高速なフォントサイズ算出
 function fitFontSize(ctx,ch,maxSize,maxWidth,bold){
   const prefix=bold?'bold ':'';
   let lo=1,hi=Math.max(1,Math.floor(maxSize)),best=lo;
@@ -81,7 +82,6 @@ function fitFontSize(ctx,ch,maxSize,maxWidth,bold){
 }
 
 function computeActiveGrid(ch){
-  // needActiveフラグの処理を削除（キャッシュがない時だけ呼ばれるため常に全計算する）
   const rows=16,cols=16,scale=40,mask=document.createElement('canvas'),m=mask.getContext('2d');
   mask.width=cols*scale;mask.height=rows*scale;m.fillStyle='#000';m.fillRect(0,0,mask.width,mask.height);m.fillStyle='#fff';m.textAlign='center';m.textBaseline='middle';
   const fontSize=fitFontSize(m,ch,mask.height*.99,mask.width*.97,true);
@@ -101,15 +101,14 @@ function computeActiveGrid(ch){
   return {rows,cols,active,isBorder};
 }
 
+// [ソース1の最適化] キャッシュ存在時は重いCanvas計算を完全スキップ
 function makePuzzle(ch,index,x,y){
   const cached=window.PUZZLE_CACHE&&window.PUZZLE_CACHE[index];
-  // shapeに加えて、borderのキャッシュがあるかを確認
   const hasBakedShape=!!(cached&&cached.shape&&cached.border);
   
   let rows=16, cols=16, active=[], isBorder=[];
 
   if(hasBakedShape){
-    // キャッシュがある場合はCanvas解析を完全にスキップ
     const shapeSet=new Set(cached.shape);
     const borderSet=new Set(cached.border);
     for(let r=0;r<rows;r++){
@@ -121,7 +120,6 @@ function makePuzzle(ch,index,x,y){
       }
     }
   } else {
-    // キャッシュがない場合のみフォールバックで計算
     const res = computeActiveGrid(ch);
     rows=res.rows; cols=res.cols; active=res.active; isBorder=res.isBorder;
   }
@@ -139,7 +137,7 @@ function makePuzzle(ch,index,x,y){
   
   return {ch,index,x,y,rows,cols,active,isBorder,answer,player:{},initialPlayer,clues,letterHints,cleared:false,dirty:true,revealed:false};
 }
-// 最適化: PUZZLE_MAP.split('\n') の重複処理を排除し、先ほどの maxRowWidth を活用
+
 const MAP_ROWS = PUZZLE_LINES.length; 
 const PADDING_X = 64;const PADDING_Y = 64;
 const WORLD_MIN_X = -PADDING_X;const WORLD_MAX_X = maxRowWidth + PADDING_X; 
@@ -162,6 +160,7 @@ allEntries.forEach(({e,kind})=>{
   }
 });
 if(curPuzzles.length||curLetters.length)stages.push({puzzles:curPuzzles,letters:curLetters});
+stages.forEach((stage,i)=>stage.puzzles.forEach(p=>p.stageIndex=i));
 
 const puzzles = [], activeWorldLetters = [];
 let currentStageIndex = 0;
@@ -225,6 +224,7 @@ function spawnStage(index) {
 
 const WORLD_TILES=GRID/CELL;
 const glyphCache=new Map();
+// [ソース1の最適化] ワールド文字のフォントサイズも二分探索で高速化
 function getGlyph(ch){
   if(glyphCache.has(ch))return glyphCache.get(ch);
   const gscale=32,size=WORLD_TILES*gscale,cv=document.createElement('canvas'),g=cv.getContext('2d');
@@ -250,6 +250,7 @@ function getGlyphCells(ch){
   }
   glyphCellsCache.set(ch,cells);return cells;
 }
+
 function worldToScreen(x,y){return {x:(x-cam.x)*zoom+innerWidth/2,y:(y-cam.y)*zoom+innerHeight/2}}
 function screenToWorld(x,y){return {x:(x-innerWidth/2)/zoom+cam.x,y:(y-innerHeight/2)/zoom+cam.y}}
 function inViewport(x,y){const g=worldToScreen(x,y),half=GRID*zoom/2;return g.x+half>=0&&g.x-half<=innerWidth&&g.y+half>=0&&g.y-half<=innerHeight}
@@ -311,27 +312,22 @@ function getTileBitmaps(z){
   const mk=kind=>{const c=document.createElement('canvas');c.width=t;c.height=t;const g=c.getContext('2d');g.fillStyle='#000';g.fillRect(0,0,t,t);const path=new Path2D();addTileShape(path,0,0,t,kind);g.fillStyle='#fff';g.fill(path);return c};
   const white=mk('white'), black=mk('black'), mixed=document.createElement('canvas');mixed.width=t;mixed.height=t;
   const mg=mixed.getContext('2d');mg.translate(t/2,t/2);mg.rotate(Math.PI/2);mg.drawImage(black,-t/2,-t/2);
-  // [再最適化] パターンオブジェクトもズームレベルごとにキャッシュ。位置合わせは
-  // ctx.translate/restoreではなくpattern.setTransform()で行うので、毎フレーム
-  // 作り直す必要がなくなる(生成コスト・GC対象オブジェクトを削減)。
-  const patternOf=bmp=>{const p=v.createPattern(bmp,'repeat');return p};
-  e={white,black,mixed,patWhite:patternOf(white),patBlack:patternOf(black),patMixed:patternOf(mixed)};
-  tileBitmapCache[z]=e;return e;
+  e={white,black,mixed};tileBitmapCache[z]=e;return e;
 }
 
+// [ソース2の最適化] クリップ(clip)を避け、GPUアクセラレーションを活かして愚直にdrawImageする
 function postEffect(){
   if(source.width<=0||source.height<=0||innerWidth<=0||innerHeight<=0)return;
   v.resetTransform();
   const t=BASE_TILE*zoom, phaseX=(((innerWidth/2-cam.x*zoom)%t)+t)%t, phaseY=(((innerHeight/2-cam.y*zoom)%t)+t)%t;
   const tiles=getTileBitmaps(zoom), ox=phaseX-t, oy=phaseY-t, q1=t*.25, q3=t*.75;
-
-  // [再最適化] 背景の白パターンもclip不要、位置合わせはpattern.setTransformで行う
-  // (ctx.save/translate/restoreの往復を1回減らす)
-  tiles.patWhite.setTransform(new DOMMatrix().translate(ox,oy));
-  v.fillStyle=tiles.patWhite;v.fillRect(0,0,innerWidth,innerHeight);
-
+  
+  // 背景はパターンで一括描画
+  v.save();v.translate(ox,oy);v.fillStyle=v.createPattern(tiles.white,'repeat');v.fillRect(-ox,-oy,innerWidth,innerHeight);v.restore();
+  
   // [再最適化] RGBA(4byte/px)ではなく輝度のみのUint8Array(1byte/px)をキャッシュ。
   // 生成はソース署名が変わった時だけ(毎フレームではない)なので追加のGC負荷はゼロ。
+  // これにより毎フレームのサンプリングでの乗算(*4)とメモリ帯域を1/4に削減。
   if(!cachedImageData){
     const raw=s.getImageData(0,0,source.width,source.height).data, n=source.width*source.height, luma=new Uint8Array(n);
     for(let i=0,j=0;j<n;i+=4,j++)luma[j]=raw[i];
@@ -339,10 +335,10 @@ function postEffect(){
   }
   const data=cachedImageData, sw=source.width, sh=source.height;
 
-  // 黒/混合タイルの矩形をPath2Dにまとめ、最後にパターンで直接fill(clipは使わない)。
-  // 4点サンプリングはfor...ofループを展開し、mixed確定時点で早期終了する。
-  const blackPath=new Path2D(), mixedPath=new Path2D();
-  let hasBlack=false, hasMixed=false;
+  // [再最適化] clip()による一括塗りには戻さない(heavyで検証済みの通り、複雑パスの
+  // clipはソフトウェアラスタライズになり毎フレームだと非常に重い)。drawImage方式を維持しつつ、
+  // 4点サンプリングのfor...ofループを展開してイテレータ生成コストを排除し、
+  // min=0かつmax=255が確定した時点(mixed確定)でサンプリングを打ち切る早期終了を追加。
   for(let y=oy;y<innerHeight;y+=t)for(let x=ox;x<innerWidth;x+=t){
     let px=~~(x+q1+jx), py=~~(y+q1+jy);
     if(px<0)px=0;else if(px>=sw)px=sw-1;
@@ -364,12 +360,10 @@ function postEffect(){
     }
 
     if(min===255)continue;
-    if(max===0){blackPath.rect(x,y,t,t);hasBlack=true}
-    else{mixedPath.rect(x,y,t,t);hasMixed=true}
+    v.drawImage(max===0?tiles.black:tiles.mixed,x,y);
   }
-  if(hasBlack){tiles.patBlack.setTransform(new DOMMatrix().translate(ox,oy));v.fillStyle=tiles.patBlack;v.fill(blackPath)}
-  if(hasMixed){tiles.patMixed.setTransform(new DOMMatrix().translate(ox,oy));v.fillStyle=tiles.patMixed;v.fill(mixedPath)}
 }
+
 function clueMismatch(p,vk,target){
   const [vr,vc]=vk.split(',').map(Number),opts=vertexOptions(p.active,p.rows,p.cols,vr,vc);
   return opts.filter(o=>p.player[o.key]===o.state).length!==target;
@@ -418,35 +412,24 @@ function drawTelop(){
   const cy=innerHeight/2,startY=cy-(cachedTelopLines.length-1)*lineHeight/2;
   cachedTelopLines.forEach((line,i)=>u.fillText(line,innerWidth/2,startY+i*lineHeight));
 }
+
+// [ソース2の最適化] GC（ガベージコレクション）を発生させない、軽量で直接的なUI描画
 function drawUI(){
   u.setTransform(dpr,0,0,dpr,0,0);u.clearRect(0,0,innerWidth,innerHeight);drawTelop();if(zoom<8)return;
-  const z=CELL*zoom;
-  // [再最適化] レイアウト用の配列を作らず、パズル数(通常わずか)だけ座標計算を
-  // 使い回す代わりにやり直す。配列/オブジェクトの割り当てゼロの方がGC的には有利。
-  const gridPath=new Path2D();
+  u.strokeStyle='#fff';u.fillStyle='#fff';u.lineWidth=1;u.font='44px Arial';u.textAlign='center';u.textBaseline='middle';
   puzzles.forEach(p=>{
     if(!inViewport(p.x,p.y))return;
     refreshMismatchCache(p);
-    const g=worldToScreen(p.x,p.y),ox=g.x-p.cols*z/2,oy=g.y-p.rows*z/2;
-    for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c])gridPath.rect(ox+c*z+.5,oy+r*z+.5,z-1,z-1);
-  });
-  u.strokeStyle='#fff';u.lineWidth=1;u.stroke(gridPath);
-  u.textAlign='center';u.textBaseline='middle';
-  u.font='44px Arial';
-  puzzles.forEach(p=>{
-    if(!inViewport(p.x,p.y))return;
-    const g=worldToScreen(p.x,p.y),ox=g.x-p.cols*z/2,oy=g.y-p.rows*z/2;
+    const g=worldToScreen(p.x,p.y),z=CELL*zoom,ox=g.x-p.cols*z/2,oy=g.y-p.rows*z/2;
+    for(let r=0;r<p.rows;r++)for(let c=0;c<p.cols;c++)if(p.active[r][c])u.strokeRect(ox+c*z+.5,oy+r*z+.5,z-1,z-1);
     Object.entries(p.clues).forEach(([key,n])=>{let [r,c]=key.split(',').map(Number);u.fillStyle=p._clueBad[key]?'#f33':'#fff';u.fillText(n,ox+c*z,oy+r*z)});
-  });
-  u.font='bold 40px Arial';
-  puzzles.forEach(p=>{
-    if(!inViewport(p.x,p.y))return;
-    const g=worldToScreen(p.x,p.y),ox=g.x-p.cols*z/2,oy=g.y-p.rows*z/2;
+    u.fillStyle='#fff';u.font='bold 40px Arial';
     const seen=new Set();
     p.letterHints.forEach(h=>{if(seen.has(h.v))return;seen.add(h.v);const vr=~~(h.v/(p.cols+1)),vc=h.v%(p.cols+1);u.fillStyle=p._letterBad.has(h.v)?'#f33':'#fff';u.fillText(h.label,ox+vc*z,oy+vr*z)});
   });
   if(allClear){u.fillStyle='#fff';u.font=`bold ${Math.min(innerWidth,innerHeight)*.17}px Arial`;u.textAlign='center';u.fillText('THX.',innerWidth/2,innerHeight/2)}
 }
+
 function applyMoire(){
   if(moire.width<=0||moire.height<=0)return;
   mo.drawImage(view,0,0,view.width,view.height,0,0,moire.width,moire.height);
@@ -464,11 +447,12 @@ function scheduleRender(){
   if(renderScheduled)return;renderScheduled=true;
   requestAnimationFrame(()=>{renderScheduled=false;render()});
 }
+
 let shimmerFrame=0;
 const SHIMMER_EVERY=2;
+// [ソース1の最適化] 条件判定を整理したクリーンなエフェクトループ
 function shimmerLoop(){
   shimmerFrame++;
-  // 最適化: fxEnabled の条件を先頭にまとめることで計算をクリーンに
   if(fxEnabled && shimmerFrame%SHIMMER_EVERY===0){
     jx=(Math.random()-.5)*1.2;jy=(Math.random()-.5)*1.2;
     scheduleRender();
@@ -476,6 +460,7 @@ function shimmerLoop(){
   requestAnimationFrame(shimmerLoop);
 }
 requestAnimationFrame(shimmerLoop);
+
 function clickPuzzle(e){if(zoom<8||allClear)return;let q=screenToWorld(e.clientX,e.clientY);
   for(const p of puzzles){if(p.cleared||!p.revealed)continue;let left=p.x-p.cols*CELL/2,top=p.y-p.rows*CELL/2,c=Math.floor((q.x-left)/CELL),r=Math.floor((q.y-top)/CELL);if(r<0||c<0||r>=p.rows||c>=p.cols||!p.active[r]?.[c])continue;
     const k=r+','+c;
@@ -495,7 +480,7 @@ ui.addEventListener('pointerdown',e=>{
   pointers.set(e.pointerId,e);ui.setPointerCapture(e.pointerId);
   if(pointers.size===1)drag={x:e.clientX,y:e.clientY,cx:cam.x,cy:cam.y,moved:false};
   else if(pointers.size===2){
-    let p=[...pointers.values()]; // 最適化: Array.from(...) をスプレッド構文に変更
+    let p=[...pointers.values()]; 
     pinchDist=Math.hypot(p[0].clientX-p[1].clientX,p[0].clientY-p[1].clientY);
     if(drag)drag.moved=true;
   }
